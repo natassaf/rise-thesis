@@ -1,0 +1,22 @@
+spin_manifest_version = 2
+
+[application]
+name = "thesis-web-server-spin"
+version = "0.1.0"
+authors = ["Athanasia Farmaki <farmaki@kth.se>"]
+description = "A web server app accepting tasks via http, running the tasks and returning the results asynchronously"
+
+[[trigger.http]]
+route = "/submitTask"
+component = "thesis-web-server-spin"
+
+[component.thesis-web-server-spin]
+source = "target/wasm32-wasip1/release/thesis_web_server_spin.wasm"
+allowed_outbound_hosts = ["redis://127.0.0.1:6379"]
+[component.thesis-web-server-spin.build]
+command = "cargo build --target wasm32-wasip1 --release"
+watch = ["src/**/*.rs", "Cargo.toml"]
+
+
+
+
