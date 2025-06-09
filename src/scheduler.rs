@@ -1,83 +1,31 @@
-    use std::{collections::{vec_deque, HashMap, VecDeque}, rc::Weak, sync::Arc, thread::{self, JoinHandle}, time::Duration};
+    use std::{collections::{HashMap}, sync::Arc, time::Duration};
 
     use actix_web::web;
-    use futures::future::join_all;
-    use tokio::{sync::Mutex, time::sleep};
-    use rand::Rng;
-    use tokio::{task, time::error::Error};
-    use crate::{all_tasks::fibonacci, various::{Job, SubmittedJobs}};
+    use tokio::{time::sleep};
+    use tokio::{time::error::Error};
+    use crate::{various::{Job, SubmittedJobs}, worker::Worker};
     use core_affinity::*;
 
 
-    pub struct Worker{
-        worker_id:usize,
-        core_id:CoreId,
-        thread_queue: Arc<Mutex<VecDeque<Job>>>
-    }
-
-    impl Worker{
-        pub fn new(worker_id:usize, core_id:CoreId)->Self{
-            let thread_queue = Arc::new(Mutex::new(VecDeque::new()));
-            // let core = core_ids[i % num_cores];
-            Worker{worker_id, core_id, thread_queue}
-        }
-
-        pub async fn start(&self){
-            println!("Worker: {:?} started on core id : {:?}", self.worker_id, self.core_id);
-            loop{
-                // Retrieves the next task from the queue runs it buy awaiting and returns result
-                let mut queue = self.thread_queue.lock().await; // lock the mutex
-                let my_task = queue.pop_front();
-                match my_task{
-                    None=> (),
-                    Some(my_task_1)=>{
-                        let my_task = my_task_1.clone();
-                        let core_id = self.core_id.clone();
-                        // Spawn a blocking task to map the worker to the core 
-                        let handle = task::spawn_blocking(move || {     
-                            core_affinity::set_for_current(core_id);
-                            println!("Running task {} on core {:?}", my_task.name, core_id);
-                            let result = fibonacci(my_task.n);
-                            
-                            // Store result in a file named after the task
-                            let file_name = format!("result_{}.txt", my_task.id);
-                            std::fs::write(&file_name, format!("Result: {}", result)).expect("Failed to write result to file");
-                            println!("Finished task {}", my_task.name);
-                            result
-                        });
-                        let result = match handle.await {
-                            Ok(result) => Some(result),
-                            Err(e) => None,
-                        };
-                        ()
-                        }
-                    }
-                }
-            }
-    }
 
     // ========== SCHEDULER ==========
     pub struct JobsScheduler{
         submitted_jobs: web::Data<SubmittedJobs>,
         assigned_jobs: HashMap<usize, Vec<Job>>,
-        core_ids: Vec<CoreId>,
-        num_cores: usize,
         workers: Vec<Arc<Worker>>
     }
 
     impl JobsScheduler{
 
         pub fn new(core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>)->Self{
-            let num_cores = &core_ids.len();
-            let assigned_jobs: HashMap<usize, Vec<Job>> = core_ids.iter().map(|(&val)| (val.id, vec![])).collect();
+            let assigned_jobs: HashMap<usize, Vec<Job>> = core_ids.iter().map(|&val| (val.id, vec![])).collect();
             // let workers = core_ids.iter().map(|core_id| Worker::new(core_id.id, *core_id)).collect();
             let workers: Vec<Arc<Worker>> = core_ids.iter().map(|core_id| Arc::new(Worker::new(core_id.id, *core_id))).collect();
-            JobsScheduler{submitted_jobs, assigned_jobs, core_ids, num_cores: *num_cores, workers}
+            JobsScheduler{submitted_jobs, assigned_jobs, workers}
         }
 
-        pub async fn start_scheduler(&self) -> Result<(), Error> {
+        pub async fn start_scheduler(&mut self) -> Result<(), Error> {
             // start all workers
-            // let results  = self.assigned_jobs.iter().map(|(k, v)| self.workers[*k].start()).collect();
             for worker in &self.workers {
                 let worker = Arc::clone(worker);
                 tokio::spawn(async move {
@@ -86,103 +34,62 @@
                 });
             }
 
-
             loop {
-                // iterate through assigned jobs  and spawn worker
                 println!("Checking for new tasks");
                 println!("Num of submitted tasks: {:?}", self.submitted_jobs.get_num_tasks().await);
+                Self::submitted_to_assigned_jobs(&self.submitted_jobs, &mut self.assigned_jobs).await;
+                println!("Jobs to assign: {:?}", self.assigned_jobs);
+                for (k,v) in self.assigned_jobs.iter(){
+                    self.workers[*k].add_to_queue(v.clone()).await;
+                }
+                
+                for jobs in self.assigned_jobs.values_mut() {
+                    jobs.clear();
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         }
 
-        pub async fn calculate_task_priorities(&self){
-            self.assign_random_priorities().await;
-        }
+        pub async fn submitted_to_assigned_jobs(
+            submitted_jobs: &web::Data<SubmittedJobs>, 
+            assigned_jobs: &mut HashMap<usize, Vec<Job>>
+        ) {
+            // 1. Get all submitted jobs (pending tasks)
+            let mut pending_jobs = submitted_jobs.get_jobs().await;
 
-        pub async fn assign_random_priorities(&self) {
-            let mut jobs = self.submitted_jobs.get_jobs().await;
+            // 2. Sort keys of assigned_jobs ascending to break ties by lowest key
+            let mut worker_keys: Vec<usize> = assigned_jobs.keys().cloned().collect();
+            worker_keys.sort();
 
-            let mut rng = rand::rng();
+            // 3. Helper function to find best worker key to assign a job
+            fn find_worker_key(assigned_jobs: &HashMap<usize, Vec<Job>>, keys: &[usize]) -> Option<usize> {
+                // Prefer empty workers
+                if let Some(empty_key) = keys.iter()
+                    .find(|&&key| assigned_jobs.get(&key).map(|v| v.is_empty()).unwrap_or(true))
+                {
+                    return Some(*empty_key);
+                }
 
-            for job in jobs.iter_mut() {
-                job.set_priority(rng.random_range(1..4)); 
+                // Otherwise find worker with least jobs
+                keys.iter()
+                    .min_by_key(|&&key| assigned_jobs.get(&key).map(|v| v.len()).unwrap_or(usize::MAX))
+                    .copied()
             }
 
-            println!("Updated task priorities: {:?}", jobs);
+            // 4. Assign each pending job to a worker and remove it from submitted jobs
+            for job in pending_jobs.drain(..) {
+                if let Some(worker_key) = find_worker_key(&assigned_jobs, &worker_keys) {
+                    assigned_jobs.entry(worker_key).or_default().push(job.clone());
+
+                    // Remove the job from submitted_jobs storage
+                    // Assuming you have a method `remove_job` that accepts job ID and is async
+                    submitted_jobs.remove_job(job.id).await;
+                } else {
+                    // No workers available? Could log or break here
+                    break;
+                }
+            }
         }
 
-        // pub async fn assign_tasks_to_workers(){
 
-        // }
-
-        pub async fn run_tasks_parallel(&self)->Vec<task::JoinHandle<usize>> {
-            let tasks = {
-                let guard = self.submitted_jobs.get_jobs().await;
-                guard.clone()
-            };
-            let core_ids: Vec<CoreId> = core_affinity::get_core_ids().expect("Failed to get core IDs");
-            let num_cores = core_ids.len();
-
-            println!("num_cores: {}", num_cores);
-            println!("core_ids: {:?}", core_ids);
-            let handles:Vec<task::JoinHandle<usize>> = tasks.into_iter().enumerate().map(|(i, my_task)| {
-                let core = core_ids[i % num_cores];
-
-                // Spawn a blocking task, safe to use thread-affinity
-                let handle = task::spawn_blocking(move || {
-                    core_affinity::set_for_current(core);
-                    println!("Running task {} on core {}", my_task.name, core.id);
-
-                    let result = fibonacci(my_task.n);
-
-                    // Store result in a file named after the task
-                    let file_name = format!("result_{}.txt", my_task.id);
-                    std::fs::write(&file_name, format!("Result: {}", result))
-                        .expect("Failed to write result to file");
-                    println!("Finished task {}", my_task.name);
-
-                    result
-                });
-                handle
-            }).collect();
-            handles
-        }
-        
-    pub async fn run_tasks(&self)->Vec<usize> {
-            let tasks = {
-                let guard = self.submitted_jobs.jobs.lock().await;
-                guard.clone()
-            };
-            let result = tasks.into_iter().enumerate().map(|(i, my_task)| fibonacci(my_task.n)).collect();
-            println!("task executed result: {:?}", result);
-            result
-        }
     }
-
-
-    // // Read full job queue (append-only log)
-    // fn read_job_log() -> Result<Vec<Job>, Error> {
-    //     // - Open shared log
-    //     // - Deserialize all jobs
-    // }
-
-    // // Decide which jobs to schedule and assign worker IDs & priorities
-    // fn schedule_jobs(jobs: &mut [Job]) -> Result<(), Error> {
-    //     // - Filter queued jobs
-    //     // - Sort by priority
-    //     // - Assign target_worker and update job.status = Scheduled
-    //     // - Write back updated job metadata (status, assignment)
-    // }
-
-    // // Monitor job queue for new jobs and trigger scheduling loop
-    // fn scheduler_loop() -> Result<(), Error> {
-    //     loop {
-    //         // - Wait for new job arrival (poll or event)
-    //         // - read_job_log()
-    //         // - schedule_jobs()
-    //         // - sleep or wait
-    //     }
-    // }
-
-
-    

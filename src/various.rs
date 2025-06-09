@@ -1,5 +1,4 @@
 use serde::{Deserialize, Deserializer};
-use rand::Rng;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,11 +59,16 @@ impl SubmittedJobs{
         Self{jobs: tasks}
     }
 
+    pub async fn remove_job(&self, job_id: usize) {
+        let mut jobs = self.jobs.lock().await;
+        jobs.retain(|job| job.id != job_id);
+    }
+
     pub async fn get_num_tasks(&self)->usize{
         let guard = self.jobs.lock();
         guard.await.len()
     }
-
+    
     pub async fn get_jobs(&self)->Vec<Job>{
         self.jobs.lock().await.to_vec()
     }
@@ -74,14 +78,5 @@ impl SubmittedJobs{
         guard.push(task);
     }
 
-    pub async fn calculate_task_priorities(&self) {
-        let mut task_list = self.jobs.lock().await;
-        let mut rng = rand::rng();
-
-        for task in task_list.iter_mut() {
-            task.priority = rng.random_range(1..4); 
-        }
-
-        println!("Updated task priorities: {:?}", *task_list);
-    }
 }
+
