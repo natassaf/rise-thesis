@@ -1,13 +1,13 @@
-    use std::{collections::{vec_deque, HashMap, VecDeque}, sync::Arc, thread::{self, JoinHandle}, time::Duration};
+    use std::{collections::{vec_deque, HashMap, VecDeque}, rc::Weak, sync::Arc, thread::{self, JoinHandle}, time::Duration};
 
     use actix_web::web;
-    use tokio::sync::Mutex;
+    use futures::future::join_all;
+    use tokio::{sync::Mutex, time::sleep};
     use rand::Rng;
     use tokio::{task, time::error::Error};
     use crate::{all_tasks::fibonacci, various::{Job, SubmittedJobs}};
     use core_affinity::*;
 
-    type worker = usize;
 
     pub struct Worker{
         worker_id:usize,
@@ -18,53 +18,80 @@
     impl Worker{
         pub fn new(worker_id:usize, core_id:CoreId)->Self{
             let thread_queue = Arc::new(Mutex::new(VecDeque::new()));
+            // let core = core_ids[i % num_cores];
             Worker{worker_id, core_id, thread_queue}
         }
 
-        pub async fn start(&self, core_id:CoreId){
-            // Run worker
-            thread::spawn(move || {
-                // Pin thread to the core
-                core_affinity::set_for_current(core_id);
-                println!("[Core {}] Thread started", core_id.id);
-
-                loop {
-                    let task_opt = {
-                        let mut q = self.thread_queue.lock().await;
-                        q.pop_front()
-                    };
-
-                    if let Some(task) = task_opt {
-                        task();
-                    } else {
-                        thread::sleep(Duration::from_millis(10));
+        pub async fn start(&self){
+            println!("Worker: {:?} started on core id : {:?}", self.worker_id, self.core_id);
+            loop{
+                // Retrieves the next task from the queue runs it buy awaiting and returns result
+                let mut queue = self.thread_queue.lock().await; // lock the mutex
+                let my_task = queue.pop_front();
+                match my_task{
+                    None=> (),
+                    Some(my_task_1)=>{
+                        let my_task = my_task_1.clone();
+                        let core_id = self.core_id.clone();
+                        // Spawn a blocking task to map the worker to the core 
+                        let handle = task::spawn_blocking(move || {     
+                            core_affinity::set_for_current(core_id);
+                            println!("Running task {} on core {:?}", my_task.name, core_id);
+                            let result = fibonacci(my_task.n);
+                            
+                            // Store result in a file named after the task
+                            let file_name = format!("result_{}.txt", my_task.id);
+                            std::fs::write(&file_name, format!("Result: {}", result)).expect("Failed to write result to file");
+                            println!("Finished task {}", my_task.name);
+                            result
+                        });
+                        let result = match handle.await {
+                            Ok(result) => Some(result),
+                            Err(e) => None,
+                        };
+                        ()
+                        }
                     }
                 }
-            });
-        }
+            }
     }
 
     // ========== SCHEDULER ==========
     pub struct JobsScheduler{
         submitted_jobs: web::Data<SubmittedJobs>,
-        assigned_jobs: HashMap<worker, Vec<Job>>,
-        core_ids: Vec<usize>,
-        num_cores: usize
+        assigned_jobs: HashMap<usize, Vec<Job>>,
+        core_ids: Vec<CoreId>,
+        num_cores: usize,
+        workers: Vec<Arc<Worker>>
     }
 
     impl JobsScheduler{
 
-        pub async fn new(core_ids: Vec<usize>, submitted_jobs: web::Data<SubmittedJobs>)->Self{
+        pub fn new(core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>)->Self{
             let num_cores = &core_ids.len();
-            let assigned_jobs: HashMap<worker, Vec<Job>> = core_ids.iter().map(|(&val)| (val, vec![])).collect();
-            JobsScheduler{submitted_jobs: submitted_jobs, assigned_jobs, core_ids, num_cores: *num_cores}
+            let assigned_jobs: HashMap<usize, Vec<Job>> = core_ids.iter().map(|(&val)| (val.id, vec![])).collect();
+            // let workers = core_ids.iter().map(|core_id| Worker::new(core_id.id, *core_id)).collect();
+            let workers: Vec<Arc<Worker>> = core_ids.iter().map(|core_id| Arc::new(Worker::new(core_id.id, *core_id))).collect();
+            JobsScheduler{submitted_jobs, assigned_jobs, core_ids, num_cores: *num_cores, workers}
         }
 
-        pub async fn scheduler_loop() -> Result<(), Error> {
+        pub async fn start_scheduler(&self) -> Result<(), Error> {
             // start all workers
+            // let results  = self.assigned_jobs.iter().map(|(k, v)| self.workers[*k].start()).collect();
+            for worker in &self.workers {
+                let worker = Arc::clone(worker);
+                tokio::spawn(async move {
+                    worker.start().await;
+                    sleep(Duration::from_millis(100)).await;
+                });
+            }
+
+
             loop {
-                // if any worker has empty queues: Add job to queue
-                
+                // iterate through assigned jobs  and spawn worker
+                println!("Checking for new tasks");
+                println!("Num of submitted tasks: {:?}", self.submitted_jobs.get_num_tasks().await);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         }
 
@@ -84,6 +111,9 @@
             println!("Updated task priorities: {:?}", jobs);
         }
 
+        // pub async fn assign_tasks_to_workers(){
+
+        // }
 
         pub async fn run_tasks_parallel(&self)->Vec<task::JoinHandle<usize>> {
             let tasks = {
