@@ -12,3 +12,9 @@ lazy_static = "1.4"
 tokio = "1.45.1"
 rand = "0.9.1"
 core_affinity = "0.8.3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"      # optimize for size
+strip = "debuginfo"  # strip debug info
