@@ -1,0 +1,12 @@
+[package]
+name = "fib-wasm"
+version = "0.0.0"
+authors = ["The Wasmtime Project Developers"]
+edition = "2021"
+publish = false
+
+
+[lib]
+crate-type = ["cdylib"]
+path = "fib.rs"
+name = "fib"

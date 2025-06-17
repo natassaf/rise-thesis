@@ -4,58 +4,22 @@ mod all_tasks;
 mod worker;
 
 use std::{sync::Arc};
-
 use tokio::sync::Mutex;
-use various::{Job};
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use core_affinity::{get_core_ids, CoreId};
-use serde::Deserialize;
 
-use crate::{scheduler::JobsScheduler, various::SubmittedJobs};
-
-
-use std::fs;
-use std::io::{ErrorKind};
-
-pub fn read_result_by_id(id: usize) -> Option<String> {
-    let path = format!("results/result_{}.txt", id);
-    
-    match fs::read_to_string(&path) {
-        Ok(content) => {
-            // Expect format: "Result: <value>"
-            if let Some(line) = content.lines().find(|line| line.starts_with("Result: ")) {
-                Some(line.trim_start_matches("Result: ").trim().to_string())
-            } else {
-                None
-            }
-        },
-        Err(e) => {
-            match e.kind() {
-                ErrorKind::NotFound => None,
-                _ => {
-                    eprintln!("Error reading result file {}: {:?}", path, e);
-                    None
-                }
-            }
-        }
-    }
-}
-
-
-#[derive(Deserialize)]
-struct TaskQuery {
-    id: usize,
-}
+use crate::scheduler::JobsScheduler;
+use crate::various::{stored_result_decoder, SubmittedJobs, TaskQuery, WasmJob};
 
 async fn handle_get_result(query: web::Query<TaskQuery>) -> impl Responder {
     println!("Running get result");
-    match read_result_by_id(query.id) {
+    match stored_result_decoder(query.id) {
         Some(result) => HttpResponse::Ok().body(format!("Result: {}", result)),
         None => HttpResponse::NotFound().body("Result not found"),
     }
 }
 
-async fn handle_submit_task(task: web::Json<Job>, submitted_tasks: web::Data<SubmittedJobs>)->impl Responder {
+async fn handle_submit_task(task: web::Json<WasmJob>, submitted_tasks: web::Data<SubmittedJobs>)->impl Responder {
     // Reads the json request and adds the job to the job logger. Returns response immediatelly to client
     submitted_tasks.add_task(task.into_inner()).await;
     // tokio::spawn(async move {
@@ -71,7 +35,6 @@ async fn handle_submit_task(task: web::Json<Job>, submitted_tasks: web::Data<Sub
     println!("Number of tasks waiting: {:?}", submitted_tasks.get_num_tasks().await);
     HttpResponse::Ok().body("Task submitted")
 }
-
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -108,3 +71,5 @@ async fn main() -> std::io::Result<()> {
     }).bind("[::]:8080")?
     .run().await
 }
+
+
