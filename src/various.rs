@@ -48,13 +48,14 @@ impl<'de> Deserialize<'de> for WasmJob {
         D: Deserializer<'de>,
     {
         let input = JobInput::deserialize(deserializer)?;
-        let priority: u64 = 0;
-        let id:usize= TASK_ID_COUNTER.fetch_add(1, Ordering::Relaxed).try_into().unwrap();
-
+        let binary_path = match input.task_type.as_str(){
+            "fib"=> Some("wasm-modules/fib.wasm".to_string()),
+            _=>None
+        };
         Ok(Self {
             job_input: input,
             wat_path:None,
-            binary_path:None
+            binary_path:binary_path
         })
     }
 }

@@ -1,7 +1,6 @@
     use std::{collections::{VecDeque}, sync::Arc};
 
-    use anyhow::Error;
-    use core_affinity::CoreId;
+    use core_affinity::{get_core_ids, CoreId};
     use tokio::{sync::Mutex};
     use wasmtime::{Engine, Module, Store, Instance, TypedFunc};
     use tokio::{self, task};
@@ -18,7 +17,8 @@
     impl Worker{
         pub fn new(worker_id:usize, core_id:CoreId)->Self{
             let thread_queue = Arc::new(Mutex::new(VecDeque::new()));
-            // let core = core_ids[i % num_cores];
+            let core_ids: Vec<CoreId> = get_core_ids().expect("Failed to get core IDs");
+            let core_id = core_ids[6];
             Worker{worker_id, core_id, thread_queue}
         }
 
@@ -46,24 +46,18 @@
                         })
         }
 
-        pub async fn run_wasm_job(core_id: CoreId, task_id: usize, task_n: usize)->task::JoinHandle<u64>{
+        pub async fn run_wasm_job(core_id: CoreId, task_id: usize, task_n: usize, path_to_module:Option<String>)->task::JoinHandle<u64>{
             // Set up Wasmtime engine and module outside blocking
-            let engine = Engine::default();
-            
-            let path_to_module: &'static str = "wasm-modules/target/wasm32-unknown-unknown/release/fib.wasm";
-            let module = Module::from_file(&engine, path_to_module).unwrap();
-
-            // For each input spawn a blocking task that instantiates and runs wasm fib
-            let mut store = Store::new(&engine, ());
-            let instance = Instance::new(&mut store, &module, &[]).unwrap();
-            let fib: TypedFunc<u64, u64> = instance.get_typed_func(&mut store, "fib").unwrap();
+            let mut wasm_loader = ModuleWasmLoader::new(());
+            let func_to_run = wasm_loader.load_wasm_module("fib", path_to_module);
             task::spawn_blocking(move || {
-                let result = fib.call(&mut store, task_n.try_into().unwrap()).unwrap();
+                println!{"Task {task_id} running on core {:?}", core_id.clone()};
+                core_affinity::set_for_current(core_id);
+                let result = func_to_run.call(&mut wasm_loader.store, task_n.try_into().unwrap()).unwrap();
                 Self::store_result(task_id, result);
                 println!("Finished wasm task {}", task_id);
                 result
             })
-
         }
 
         pub async fn start(&self){
@@ -82,9 +76,11 @@
                         let task_id = my_task_1.job_input.id.clone(); // for testing
                         let task_n: usize = my_task_1.job_input.n.clone();
                         let core_id = self.core_id.clone(); // clone cause we need to pass by value a copy on each thread and it is bound to self
-                        
+                        let task_module_path = my_task_1.binary_path;
                         // Spawn a blocking task to map the worker to the core 
-                        let handle: task::JoinHandle<u64> = Self::run_wasm_job(core_id, task_id, task_n.try_into().unwrap()).await;
+                        let handle: task::JoinHandle<u64> = Self::run_wasm_job(core_id, task_id, task_n.try_into().unwrap(),task_module_path).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(20)).await; // for testing
+
                         let _result = match handle.await {
                             Ok(result) => Some(result),
                             Err(e) => None,
@@ -95,3 +91,29 @@
                 }
             }
     }
+
+
+struct ModuleWasmLoader<T>{
+    engine:Engine,
+    store: Store<T>
+}
+
+impl<T> ModuleWasmLoader<T>{
+
+    pub fn new(data:T)->Self{
+        println!("Loading wasm module");
+        let engine = Engine::default();
+        let mut store: Store<T> = Store::new(&engine, data);
+        Self {engine, store}
+    }
+
+    pub fn load_wasm_module(&mut self, module_name:&str, path_to_module:Option<String>)-> TypedFunc<u64, u64> {
+        let module = Module::from_file(&self.engine, path_to_module.unwrap()).unwrap();
+        let instance = Instance::new(&mut self.store, &module, &[]).unwrap();
+        let fib: TypedFunc<u64, u64> = instance.get_typed_func(&mut self.store, module_name).unwrap();
+        fib
+    }
+
+    pub fn load_wasm_component(&self, component_name:&str){}
+
+}

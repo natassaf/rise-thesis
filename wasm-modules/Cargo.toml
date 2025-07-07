@@ -1,5 +1,5 @@
 [package]
-name = "fib-wasm"
+name = "proof_of_work_wasm"
 version = "0.0.0"
 authors = ["The Wasmtime Project Developers"]
 edition = "2021"
@@ -8,5 +8,8 @@ publish = false
 
 [lib]
 crate-type = ["cdylib"]
-path = "fib.rs"
-name = "fib"
+path = "proof_of_work.rs"
+name = "proof_of_work"
+
+[dependencies]
+sha2 = "0.10.9"
