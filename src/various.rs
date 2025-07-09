@@ -1,4 +1,5 @@
 use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,22 +14,23 @@ pub struct TaskQuery {
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct JobInput {
-    pub task_type: String,
-    pub n: usize,
-    pub id: usize
+    pub func_name: String,
+    pub input: Value,
+    pub id: usize,
+    pub binary_name: String
 }
 
 
 #[derive(Debug, Clone)]
 pub struct WasmJob{
     pub job_input: JobInput,
-    pub binary_path:Option<String>,
-    pub wat_path:Option<String>,
+    pub binary_path:String,
+    pub func_name:String
 }
 
  impl WasmJob{
-    pub fn new(binary_path: Option<String>, wat_path: Option<String>, job_input: JobInput)->Self{
-        WasmJob{binary_path, wat_path, job_input}
+    pub fn new(binary_path: String, job_input: JobInput, func_name:String)->Self{
+        WasmJob{binary_path, job_input, func_name}
     }
  }
 
@@ -48,14 +50,11 @@ impl<'de> Deserialize<'de> for WasmJob {
         D: Deserializer<'de>,
     {
         let input = JobInput::deserialize(deserializer)?;
-        let binary_path = match input.task_type.as_str(){
-            "fib"=> Some("wasm-modules/fib.wasm".to_string()),
-            _=>None
-        };
+        let binary_path = "wasm-modules/".to_owned()+ input.binary_name.as_str()+ ".wasm";
         Ok(Self {
-            job_input: input,
-            wat_path:None,
-            binary_path:binary_path
+            job_input: input.clone(),
+            binary_path:binary_path,
+            func_name: input.func_name
         })
     }
 }

@@ -3,7 +3,7 @@
     use actix_web::web;
     use tokio::{time::sleep};
     use tokio::{time::error::Error};
-    use crate::{various::{Job, SubmittedJobs, WasmJob}, worker::Worker};
+    use crate::{various::{SubmittedJobs, WasmJob}, worker::Worker};
     use core_affinity::*;
 
 

@@ -1,0 +1,5 @@
+package multi:wasm; 
+
+world mathtasks {
+  export is-prime: func(n: u64) -> u32; 
+}
