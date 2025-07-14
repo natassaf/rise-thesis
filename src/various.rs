@@ -1,4 +1,6 @@
-use serde::{Deserialize, Deserializer};
+use bincode::config::standard;
+use bincode::{encode_to_vec, Encode};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -11,26 +13,68 @@ pub struct TaskQuery {
     pub id: usize,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Encode)]
+#[serde(untagged)]
+pub enum Input {
+    U64(u64),
+    F64(f64),
+    ListU64(Vec<u64>),
+    ListF32(Vec<f32>),
+}
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct JobInput {
     pub func_name: String,
-    pub input: Value,
+    pub input: Vec<u8>,
     pub id: usize,
     pub binary_name: String
 }
 
+fn encode_input(input: &Input) -> Vec<u8> {
+    let config = standard();
+    encode_to_vec(input, config).expect("Failed to encode input")
+}
+
+// Custom Deserialize for JobInput to encode `input` dynamically
+impl<'de> Deserialize<'de> for JobInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // First, deserialize to an intermediate struct with Input
+        #[derive(Deserialize)]
+        struct RawJobInput {
+            func_name: String,
+            input: Input,
+            id: usize,
+            binary_name: String,
+        }
+
+        let raw = RawJobInput::deserialize(deserializer)?;
+        let encoded = encode_input(&raw.input);
+
+        Ok(JobInput {
+            func_name: raw.func_name,
+            input: encoded,
+            id: raw.id,
+            binary_name: raw.binary_name,
+        })
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct WasmJob{
     pub job_input: JobInput,
     pub binary_path:String,
-    pub func_name:String
 }
 
  impl WasmJob{
-    pub fn new(binary_path: String, job_input: JobInput, func_name:String)->Self{
-        WasmJob{binary_path, job_input, func_name}
+
+    pub fn new(binary_path: String, job_input: JobInput) -> Self {
+        WasmJob {
+            binary_path,
+            job_input
+        }
     }
  }
 
@@ -44,17 +88,17 @@ pub struct Job{
 }
  
 
+
 impl<'de> Deserialize<'de> for WasmJob {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let input = JobInput::deserialize(deserializer)?;
+        let input: JobInput = JobInput::deserialize(deserializer)?;
         let binary_path = "wasm-modules/".to_owned()+ input.binary_name.as_str()+ ".wasm";
         Ok(Self {
             job_input: input.clone(),
-            binary_path:binary_path,
-            func_name: input.func_name
+            binary_path:binary_path
         })
     }
 }

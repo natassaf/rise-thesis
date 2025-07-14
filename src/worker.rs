@@ -1,11 +1,26 @@
-    use std::{collections::VecDeque, fmt::Display, sync::Arc};
-    use std::fmt::Debug;
+    use std::{collections::VecDeque, sync::Arc};
+    use std::io::{self, BufWriter};
+    use std::fs::File;
+    use std::io::{Result};
+
     use core_affinity::{get_core_ids, CoreId};
-    use serde_json::Value;
     use tokio::{sync::Mutex};
     use tokio::{self, task};
-    use wasmtime::{TypedFunc, WasmParams, WasmResults};
-    use crate::{all_tasks::fibonacci, various::{WasmJob}, wasm_loaders::{ ModuleWasmLoader}};
+    use crate::{various::{WasmJob}, wasm_loaders::{ ModuleWasmLoader}};
+    use serde::Serialize;
+
+
+    fn store_encoded_result<T: Serialize>(
+            numbers: &[T],
+            file_path: &str,
+        ) -> Result<()> {
+            let file = File::create(file_path)?;
+            let writer = BufWriter::new(file);
+
+            serde_json::to_writer(writer, numbers) // Serialize directly to the writer
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("JSON serialization failed: {}", e)))?;
+            Ok(())
+        }
 
     // Worker is mapped to a core id and runs the tasks located in each queue
     pub struct Worker{
@@ -46,17 +61,42 @@
         //                 })
         // }
 
-        pub async fn run_wasm_job_module<I:Clone + Debug + Display + Send + Sync + 'static + WasmParams + WasmResults, O:Clone + Debug + Display + Send + Sync + 'static + WasmParams + WasmResults>(core_id: CoreId, task_id: usize, task_input: I, path_to_module:String, func_name:String){
+        pub async fn run_wasm_job_module(core_id: CoreId, task_id: usize, task_input_bytes: Vec<u8>, path_to_module:String, func_name:String){
             // Set up Wasmtime engine and module outside blocking
-            let mut wasm_loader = ModuleWasmLoader::new(());
-            let func_to_run:TypedFunc<I, O> = wasm_loader.load("fib", path_to_module, func_name);
+             let mut wasm_loader = ModuleWasmLoader::new(());
+            let (loaded_func, memory) = wasm_loader.load::<(u32, u32, u32), ()>(path_to_module, func_name).await;
+            let input_num_bytes= task_input_bytes.len();
+
+            
             let handle = task::spawn_blocking(move || {
                 println!{"Task {task_id} running on core {:?}", core_id.clone()};
                 core_affinity::set_for_current(core_id);
-                let result:O = func_to_run.call(&mut wasm_loader.store, task_input).unwrap();
-                Self::store_result(task_id, &result);
-                println!("Finished wasm task {}", task_id);
-                result
+                let input_ptr = 0;
+                let out_ptr = task_input_bytes.len();
+                let output_len = task_input_bytes.len(); 
+                memory.write(&mut wasm_loader.store, input_ptr as usize, &task_input_bytes).unwrap();
+                memory.write(&mut wasm_loader.store, out_ptr as usize, &vec![0u8; output_len]).unwrap();
+
+                // Call Wasm function
+                let a_num_bytes = task_input_bytes.len() as u32;
+                loaded_func.call_async(
+                    &mut wasm_loader.store,
+                    (
+                        input_ptr as u32,
+                        input_num_bytes as u32,
+                        out_ptr as u32
+                    ),
+                ).await.unwrap();
+                // Read result
+                let mut result_bytes = vec![0u8; output_len];
+                memory.read(&mut wasm_loader.store, out_ptr as usize, &mut result_bytes).unwrap();
+                let save_file_name = format!("results/result_{}.txt", task_id);
+                let _res: std::result::Result<(), io::Error> = store_encoded_result(&result_bytes.clone(), &save_file_name);
+                println!("result_bytes {:?}", result_bytes);
+                // let (result, _bytes_read): (u64, _) = decode_from_slice(&result_bytes, encoding_config).unwrap();
+                // println!("result: {:?}", result);
+                // println!("Finished wasm task {:?}", task_id);
+                result_bytes
             });
             let _result = match handle.await {
                 Ok(result) => Some(result),
@@ -82,11 +122,11 @@
         //     })
         // }
 
-        pub async fn  run_job<I:Clone + Debug + Display + Send + Sync + 'static + WasmParams + WasmResults, O:Clone + Debug + Display + Send + Sync + 'static + WasmParams + WasmResults>(&self, task_id:usize, binary_path: String, func_name:String, task_input:I ){
+        pub async fn  run_job(&self, task_id:usize, binary_path: String, func_name:String, task_input:Vec<u8> ){
             let core_id = self.core_id.clone(); // clone cause we need to pass by value a copy on each thread and it is bound to self
             let task_module_path = binary_path;
             // Spawn a blocking task to map the worker to the core 
-            Self::run_wasm_job_module::<I, O>(core_id, task_id, task_input ,task_module_path, func_name).await;
+            Self::run_wasm_job_module(core_id, task_id, task_input ,task_module_path, func_name).await;
             // tokio::time::sleep(std::time::Duration::from_secs(20)).await; // for testing
             ()
  
@@ -104,13 +144,9 @@
                     None=> (),
                     Some(my_task_1)=>{
                         let task_id = my_task_1.job_input.id.clone(); // for testing
-                        let task_input: Value = my_task_1.job_input.input.clone();
-                        let func_name = my_task_1.func_name.clone();
-                        match func_name.as_str() {
-                            "is_prime" => self.run_job::<u64, u32>(task_id, my_task_1.binary_path, func_name, task_input.as_u64().unwrap()).await,
-                            "fib"=>self.run_job::<u64, u64>(task_id, my_task_1.binary_path, func_name, task_input.as_u64().unwrap()).await,
-                            _ => println!("Unknown function: {}", func_name)
-                        }
+                        let task_input: Vec<u8> = my_task_1.job_input.input.clone();
+                        let func_name = my_task_1.job_input.func_name.clone();
+                        let _res = self.run_job(task_id, my_task_1.binary_path, func_name, task_input).await;
                         ()
                         }
                     }
