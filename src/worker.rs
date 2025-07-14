@@ -2,7 +2,7 @@
     use std::io::{self, BufWriter};
     use std::fs::File;
     use std::io::{Result};
-
+    use bincode::{decode_from_slice, encode_to_vec, config};
     use core_affinity::{get_core_ids, CoreId};
     use tokio::{sync::Mutex};
     use tokio::{self, task};
@@ -63,13 +63,13 @@
 
         pub async fn run_wasm_job_module(core_id: CoreId, task_id: usize, task_input_bytes: Vec<u8>, path_to_module:String, func_name:String){
             // Set up Wasmtime engine and module outside blocking
-             let mut wasm_loader = ModuleWasmLoader::new(());
-            let (loaded_func, memory) = wasm_loader.load::<(u32, u32, u32), ()>(path_to_module, func_name).await;
-            let input_num_bytes= task_input_bytes.len();
-
-            
+            // let encoding_config = config::standard();
+            // let (original_input, _): ((Vec<Vec<f32>>, Vec<Vec<f32>>), _) = decode_from_slice(&task_input_bytes, encoding_config).expect("Failed to decode mat1");
             let handle = task::spawn_blocking(move || {
+                let mut wasm_loader = ModuleWasmLoader::new(());
+                let (loaded_func, memory) = wasm_loader.load::<(u32, u32, u32), ()>(path_to_module, func_name);
                 println!{"Task {task_id} running on core {:?}", core_id.clone()};
+                
                 core_affinity::set_for_current(core_id);
                 let input_ptr = 0;
                 let out_ptr = task_input_bytes.len();
@@ -78,21 +78,20 @@
                 memory.write(&mut wasm_loader.store, out_ptr as usize, &vec![0u8; output_len]).unwrap();
 
                 // Call Wasm function
-                let a_num_bytes = task_input_bytes.len() as u32;
-                loaded_func.call_async(
+                loaded_func.call(
                     &mut wasm_loader.store,
                     (
                         input_ptr as u32,
-                        input_num_bytes as u32,
+                        task_input_bytes.len() as u32,
                         out_ptr as u32
                     ),
-                ).await.unwrap();
+                ).unwrap();
+
                 // Read result
                 let mut result_bytes = vec![0u8; output_len];
                 memory.read(&mut wasm_loader.store, out_ptr as usize, &mut result_bytes).unwrap();
                 let save_file_name = format!("results/result_{}.txt", task_id);
                 let _res: std::result::Result<(), io::Error> = store_encoded_result(&result_bytes.clone(), &save_file_name);
-                println!("result_bytes {:?}", result_bytes);
                 // let (result, _bytes_read): (u64, _) = decode_from_slice(&result_bytes, encoding_config).unwrap();
                 // println!("result: {:?}", result);
                 // println!("Finished wasm task {:?}", task_id);
@@ -123,7 +122,7 @@
         // }
 
         pub async fn  run_job(&self, task_id:usize, binary_path: String, func_name:String, task_input:Vec<u8> ){
-            let core_id = self.core_id.clone(); // clone cause we need to pass by value a copy on each thread and it is bound to self
+            let core_id: CoreId = self.core_id.clone(); // clone cause we need to pass by value a copy on each thread and it is bound to self
             let task_module_path = binary_path;
             // Spawn a blocking task to map the worker to the core 
             Self::run_wasm_job_module(core_id, task_id, task_input ,task_module_path, func_name).await;
@@ -138,7 +137,7 @@
 
                 // Retrieve the next task from the queue runs it buy awaiting and returns result
                 let mut queue = self.thread_queue.lock().await; // lock the mutex
-                println!("Worker: {:?} queue: {:?} ", self.worker_id, queue);
+                // println!("Worker: {:?} queue: {:?} ", self.worker_id, queue);
                 let my_task:Option<WasmJob> = queue.pop_front();
                 match my_task{
                     None=> (),

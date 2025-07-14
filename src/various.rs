@@ -22,7 +22,7 @@ pub enum Input {
     ListF32(Vec<f32>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct JobInput {
     pub func_name: String,
     pub input: Vec<u8>,
@@ -35,32 +35,32 @@ fn encode_input(input: &Input) -> Vec<u8> {
     encode_to_vec(input, config).expect("Failed to encode input")
 }
 
-// Custom Deserialize for JobInput to encode `input` dynamically
-impl<'de> Deserialize<'de> for JobInput {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        // First, deserialize to an intermediate struct with Input
-        #[derive(Deserialize)]
-        struct RawJobInput {
-            func_name: String,
-            input: Input,
-            id: usize,
-            binary_name: String,
-        }
+// // Custom Deserialize for JobInput to encode `input` dynamically
+// impl<'de> Deserialize<'de> for JobInput {
+//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+//     where
+//         D: Deserializer<'de>,
+//     {
+//         // First, deserialize to an intermediate struct with Input
+//         #[derive(Deserialize)]
+//         struct RawJobInput {
+//             func_name: String,
+//             input: Input,
+//             id: usize,
+//             binary_name: String,
+//         }
 
-        let raw = RawJobInput::deserialize(deserializer)?;
-        let encoded = encode_input(&raw.input);
+//         let raw = RawJobInput::deserialize(deserializer)?;
+//         let encoded = encode_input(&raw.input);
 
-        Ok(JobInput {
-            func_name: raw.func_name,
-            input: encoded,
-            id: raw.id,
-            binary_name: raw.binary_name,
-        })
-    }
-}
+//         Ok(JobInput {
+//             func_name: raw.func_name,
+//             input: encoded,
+//             id: raw.id,
+//             binary_name: raw.binary_name,
+//         })
+//     }
+// }
 
 #[derive(Debug, Clone)]
 pub struct WasmJob{

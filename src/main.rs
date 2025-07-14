@@ -4,7 +4,6 @@ mod all_tasks;
 mod worker;
 mod wasm_loaders;
 
-use std::fmt::Debug;
 use std::{sync::Arc};
 use tokio::sync::Mutex;
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};

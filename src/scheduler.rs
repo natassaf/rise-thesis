@@ -37,7 +37,7 @@
                 println!("Checking for new tasks");
                 println!("Num of submitted tasks: {:?}", self.submitted_jobs.get_num_tasks().await);
                 Self::submitted_to_assigned_jobs(&self.submitted_jobs, &mut self.assigned_jobs).await;
-                println!("Jobs to assign: {:?}", self.assigned_jobs);
+                // println!("Jobs to assign: {:?}", self.assigned_jobs);
                 for (k,v) in self.assigned_jobs.iter(){
                     self.workers[*k].add_to_queue(v.clone()).await;
                 }
