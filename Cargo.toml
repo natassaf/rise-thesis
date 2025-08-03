@@ -25,3 +25,4 @@ lto = true
 codegen-units = 1
 opt-level = "z"      # optimize for size
 strip = "debuginfo"  # strip debug info
+panic = "abort"

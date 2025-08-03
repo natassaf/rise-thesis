@@ -1,14 +1,21 @@
-To run this code on macOS
+To run this code on Rasberry
 1) Install Rust
 2) Add the ARM64 Linux target (Raspberry Pi 5 uses ARMv8/AArch64):
     rustup target add aarch64-unknown-linux-gnu
 3) Create this file .cargo/config.tomp and add the following:
     [target.aarch64-unknown-linux-gnu]
     linker = "aarch64-unknown-linux-gnu-gcc"
-4) Run :
+4) Run:
     cargo build --release --target aarch64-unknown-linux-gnu
+    aarch64-unknown-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/rise-thesis
+    scp target/aarch64-unknown-linux-gnu/release/rise-thesis pi@192.168.0.234:workspace
+    scp -r wasm-modules/ pi@192.168.0.234:workspace/ 
 
 
+
+
+scp target/aarch64-unknown-linux-gnu/release/rise-thesis pi@192.168.0.234:workspace
+aarch64-unknown-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/rise-thesis
 
 Size optimizations:
 1) Add the following to cargo.toml 

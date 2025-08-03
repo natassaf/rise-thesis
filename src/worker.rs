@@ -1,39 +1,25 @@
     use std::{collections::VecDeque, sync::Arc};
-    use std::io::{self, BufWriter};
-    use std::fs::File;
-    use std::io::{Result};
-    use bincode::{decode_from_slice, encode_to_vec, config};
-    use core_affinity::{get_core_ids, CoreId};
+    use std::io::{self};
+    use core_affinity::{CoreId};
     use tokio::{sync::Mutex};
     use tokio::{self, task};
+    use crate::various::store_encoded_result;
     use crate::{various::{WasmJob}, wasm_loaders::{ ModuleWasmLoader}};
-    use serde::Serialize;
 
 
-    fn store_encoded_result<T: Serialize>(
-            numbers: &[T],
-            file_path: &str,
-        ) -> Result<()> {
-            let file = File::create(file_path)?;
-            let writer = BufWriter::new(file);
-
-            serde_json::to_writer(writer, numbers) // Serialize directly to the writer
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("JSON serialization failed: {}", e)))?;
-            Ok(())
-        }
 
     // Worker is mapped to a core id and runs the tasks located in each queue
     pub struct Worker{
         worker_id:usize,
-        core_id:CoreId,
+        pub core_id:CoreId,
         thread_queue: Arc<Mutex<VecDeque<WasmJob>>>
     }
 
     impl Worker{
         pub fn new(worker_id:usize, core_id:CoreId)->Self{
             let thread_queue = Arc::new(Mutex::new(VecDeque::new()));
-            let core_ids: Vec<CoreId> = get_core_ids().expect("Failed to get core IDs");
-            let core_id = core_ids[6];
+            // let core_ids: Vec<CoreId> = get_core_ids().expect("Failed to get core IDs");
+            // let core_id = core_ids[2];
             Worker{worker_id, core_id, thread_queue}
         }
 

@@ -1,9 +1,8 @@
 
 
 use wasmtime::*;
-use wasmtime::{Config, Engine, Module, Store, TypedFunc, WasmParams, WasmResults};
-use wasmtime_wasi::preview1::{self, WasiP1Ctx};
-use wasmtime_wasi::p2::WasiCtxBuilder;
+use wasmtime::{Engine, Module, Store, TypedFunc, WasmParams, WasmResults};
+use wasmtime_wasi::preview1::{WasiP1Ctx};
 
 wasmtime::component::bindgen!({
     path: "wasm-modules/math_tasks.wit",

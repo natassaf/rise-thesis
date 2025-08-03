@@ -1,10 +1,9 @@
 use bincode::config::standard;
 use bincode::{encode_to_vec, Encode};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64};
 
 static TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -95,7 +94,9 @@ impl<'de> Deserialize<'de> for WasmJob {
         D: Deserializer<'de>,
     {
         let input: JobInput = JobInput::deserialize(deserializer)?;
-        let binary_path = "wasm-modules/".to_owned()+ input.binary_name.as_str()+ ".wasm";
+        // let binary_path: String = "/home/pi/workspace/wasm-modules/".to_owned()+ input.binary_name.as_str()+ ".wasm";
+        let binary_path: String = "wasm-modules/".to_owned()+ input.binary_name.as_str()+ ".wasm";
+
         Ok(Self {
             job_input: input.clone(),
             binary_path:binary_path
@@ -136,8 +137,8 @@ impl SubmittedJobs{
 }
 
 
-use std::fs;
-use std::io::{ErrorKind};
+use std::fs::{self, File};
+use std::io::{self, BufWriter, ErrorKind};
 
 pub fn stored_result_decoder(id: usize) -> Option<String> {
     /*
@@ -165,3 +166,15 @@ pub fn stored_result_decoder(id: usize) -> Option<String> {
         }
     }
 }
+
+pub fn store_encoded_result<T: Serialize>(
+        numbers: &[T],
+        file_path: &str,
+    ) -> std::io::Result<()> {
+        let file = File::create(file_path)?;
+        let writer = BufWriter::new(file);
+
+        serde_json::to_writer(writer, numbers) // Serialize directly to the writer
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("JSON serialization failed: {}", e)))?;
+        Ok(())
+    }
