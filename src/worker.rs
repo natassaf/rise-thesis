@@ -1,5 +1,7 @@
-    use std::{collections::VecDeque, sync::Arc};
+    use std::usize;
+use std::{collections::VecDeque, sync::Arc};
     use std::io::{self};
+    use bincode::decode_from_slice;
     use core_affinity::{CoreId};
     use tokio::{sync::Mutex};
     use tokio::{self, task};
@@ -53,15 +55,15 @@
             // let (original_input, _): ((Vec<Vec<f32>>, Vec<Vec<f32>>), _) = decode_from_slice(&task_input_bytes, encoding_config).expect("Failed to decode mat1");
             let handle = task::spawn_blocking(move || {
                 let mut wasm_loader = ModuleWasmLoader::new(());
-                let (loaded_func, memory) = wasm_loader.load::<(u32, u32, u32), ()>(path_to_module, func_name);
+                let (loaded_func, memory) = wasm_loader.load::<(u32, u32, u32, u32), ()>(path_to_module, func_name);
                 println!{"Task {task_id} running on core {:?}", core_id.clone()};
                 
                 core_affinity::set_for_current(core_id);
                 let input_ptr = 0;
                 let out_ptr = task_input_bytes.len();
-                let output_len = task_input_bytes.len(); 
+                let output_len_ptr = out_ptr + 1024; // reserve some extra space for output_len
                 memory.write(&mut wasm_loader.store, input_ptr as usize, &task_input_bytes).unwrap();
-                memory.write(&mut wasm_loader.store, out_ptr as usize, &vec![0u8; output_len]).unwrap();
+                memory.write(&mut wasm_loader.store, output_len_ptr as usize, &[0u8; 4]).unwrap();
 
                 // Call Wasm function
                 loaded_func.call(
@@ -69,18 +71,23 @@
                     (
                         input_ptr as u32,
                         task_input_bytes.len() as u32,
-                        out_ptr as u32
+                        out_ptr as u32,
+                        output_len_ptr as u32
                     ),
                 ).unwrap();
-
                 // Read result
-                let mut result_bytes = vec![0u8; output_len];
+                let mut output_len_buf = [0u8; 4];
+                memory.read(&mut wasm_loader.store, output_len_ptr as usize, &mut output_len_buf).unwrap();
+                let output_len = u32::from_le_bytes(output_len_buf);
+                let mut result_bytes = vec![0u8; output_len as usize];
                 memory.read(&mut wasm_loader.store, out_ptr as usize, &mut result_bytes).unwrap();
                 let save_file_name = format!("results/result_{}.txt", task_id);
                 let _res: std::result::Result<(), io::Error> = store_encoded_result(&result_bytes.clone(), &save_file_name);
-                // let (result, _bytes_read): (u64, _) = decode_from_slice(&result_bytes, encoding_config).unwrap();
+                
+                // let encoding_config = bincode::config::standard();
+                // let (result, _bytes_read): (Vec<Vec<f32>>, _) = decode_from_slice(&result_bytes, encoding_config).unwrap();
                 // println!("result: {:?}", result);
-                // println!("Finished wasm task {:?}", task_id);
+                println!("Finished wasm task {:?}", task_id);
                 result_bytes
             });
             let _result = match handle.await {
