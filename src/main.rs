@@ -3,7 +3,6 @@ mod scheduler;
 mod all_tasks;
 mod worker;
 mod wasm_loaders;
-
 use std::{sync::Arc};
 use actix_web::web::Data;
 use tokio::sync::Mutex;
@@ -90,6 +89,8 @@ async fn main() -> std::io::Result<()> {
         let h_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>> = web::Data::new(worker_handlers).clone(); 
         h_data
     };
+    
+
      HttpServer::new(move || {
         let mut app = App::new().app_data(jobs_log.clone()).app_data(scheduler.clone()).app_data(handlers_data.clone()) ;
         app = app.route("/submit_task", web::post().to(handle_submit_task));

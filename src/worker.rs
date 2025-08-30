@@ -1,4 +1,5 @@
-    use std::usize;
+    use std::collections::HashMap;
+use std::usize;
 use std::{collections::VecDeque, sync::Arc};
     use std::io::{self};
     use bincode::decode_from_slice;
@@ -54,11 +55,11 @@ use std::{collections::VecDeque, sync::Arc};
             // let encoding_config = config::standard();
             // let (original_input, _): ((Vec<Vec<f32>>, Vec<Vec<f32>>), _) = decode_from_slice(&task_input_bytes, encoding_config).expect("Failed to decode mat1");
             let handle = task::spawn_blocking(move || {
+                core_affinity::set_for_current(core_id);
                 let mut wasm_loader = ModuleWasmLoader::new(());
                 let (loaded_func, memory) = wasm_loader.load::<(u32, u32, u32, u32), ()>(path_to_module, func_name);
                 println!{"Task {task_id} running on core {:?}", core_id.clone()};
                 
-                core_affinity::set_for_current(core_id);
                 let input_ptr = 0;
                 let out_ptr = task_input_bytes.len();
                 let output_len_ptr = out_ptr + 1024; // reserve some extra space for output_len

@@ -1,0 +1,8 @@
+package matrix:multiplication;
+
+world matrix {
+    export run: func(mat1: list<list<f32>>, mat2: list<list<f32>>) -> list<list<f32>>;
+}
+
+
+
