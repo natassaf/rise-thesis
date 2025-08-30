@@ -1,7 +1,15 @@
 package matrix:multiplication;
 
+
 world matrix {
-    export run: func(mat1: list<list<f32>>, mat2: list<list<f32>>) -> list<list<f32>>;
+    record wasm-event {
+        event: string
+    }
+
+    record wasm-result {
+        output: string
+    }
+    export run: func(input: wasm-event) -> wasm-result;
 }
 
 
