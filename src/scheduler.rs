@@ -64,6 +64,15 @@
                 }
         }
 
+        pub async fn shutdown(&mut self) {
+            println!("Shutting down scheduler and all workers...");
+            for worker in &self.workers {
+                worker.shutdown().await;
+            }
+        }
+
+
+
         pub async fn execute_jobs_continuously(&mut self)->Result<(), Error>{
             loop {
                 println!("Checking for new tasks");

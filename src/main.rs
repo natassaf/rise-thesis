@@ -8,6 +8,8 @@ use actix_web::web::Data;
 use tokio::sync::Mutex;
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use core_affinity::{get_core_ids, CoreId};
+use tokio::signal;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::scheduler::JobsScheduler;
 use crate::various::{stored_result_decoder, SubmittedJobs, TaskQuery, WasmJob};
@@ -56,6 +58,9 @@ async fn main() -> std::io::Result<()> {
     let core_ids: Vec<CoreId> = get_core_ids().expect("Failed to get core IDs");
     println!("core_ids: {:?}", core_ids);
 
+    // Global shutdown flag
+    static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
+
     // Initialize scheduler object and job logger 
     // Wrapped in web::Data so that we configure them as shared resources across HTTPServer threads 
     let jobs_log: web::Data<SubmittedJobs> = web::Data::new(SubmittedJobs::new());
@@ -73,8 +78,10 @@ async fn main() -> std::io::Result<()> {
 
     let scheduler_for_spawn = scheduler.clone();
     let worker_handlers_for_spawn = handlers_data.clone();
+    let scheduler_for_shutdown = scheduler.clone();
 
-    tokio::spawn(async move {
+    // Store the scheduler handle so we can abort it on shutdown
+    let scheduler_handle = tokio::spawn(async move {
         match scheduler_for_spawn.lock().await.start_scheduler().await {
             Ok(handles) => {
                 let mut wh = worker_handlers_for_spawn.lock().await;
@@ -91,15 +98,45 @@ async fn main() -> std::io::Result<()> {
     };
     
 
-     HttpServer::new(move || {
+    // Create server with graceful shutdown
+    let server = HttpServer::new(move || {
         let mut app = App::new().app_data(jobs_log.clone()).app_data(scheduler.clone()).app_data(handlers_data.clone()) ;
         app = app.route("/submit_task", web::post().to(handle_submit_task));
         app = app.route("/get_result", web::get().to(handle_get_result));
         app = app.route("/run_tasks", web::get().to(handle_execute_tasks));
         app = app.route("/kill", web::get().to(handle_kill));
         app
-    }).bind("[::]:8080")?
-    .run().await
+    })
+    .bind("[::]:8080")?
+    .shutdown_timeout(5) // 5 seconds timeout for graceful shutdown
+    .run();
+
+    // Wait for either the server to complete or a shutdown signal
+    tokio::select! {
+        result = server => {
+            if let Err(e) = result {
+                eprintln!("Server error: {}", e);
+            }
+        }
+        _ = signal::ctrl_c() => {
+            println!("Received Ctrl+C, shutting down gracefully...");
+            // Set global shutdown flag
+            SHUTDOWN_FLAG.store(true, Ordering::Relaxed);
+            
+            // Signal shutdown to scheduler
+            if let Ok(mut sched) = scheduler_for_shutdown.get_ref().try_lock() {
+                sched.shutdown().await;
+            }
+            
+            // Abort the scheduler task
+            scheduler_handle.abort();
+            // Wait a bit for cleanup
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        }
+    }
+
+    println!("Server shutdown complete");
+    Ok(())
 }
 
 

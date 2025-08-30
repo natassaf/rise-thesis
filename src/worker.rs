@@ -1,29 +1,27 @@
-    use std::collections::HashMap;
 use std::usize;
 use std::{collections::VecDeque, sync::Arc};
     use std::io::{self};
-    use bincode::decode_from_slice;
     use core_affinity::{CoreId};
-    use tokio::{sync::Mutex};
-    use tokio::{self, task};
-    use crate::various::store_encoded_result;
-    use crate::{various::{WasmJob}, wasm_loaders::{ ModuleWasmLoader}};
-
+    use tokio::{sync::Mutex, task};
+use crate::various::store_encoded_result;
+use crate::{various::{WasmJob}, wasm_loaders::{ ModuleWasmLoader}};
 
 
     // Worker is mapped to a core id and runs the tasks located in each queue
     pub struct Worker{
         worker_id:usize,
         pub core_id:CoreId,
-        thread_queue: Arc<Mutex<VecDeque<WasmJob>>>
+        thread_queue: Arc<Mutex<VecDeque<WasmJob>>>,
+        shutdown_flag: Arc<Mutex<bool>>
     }
 
     impl Worker{
         pub fn new(worker_id:usize, core_id:CoreId)->Self{
             let thread_queue = Arc::new(Mutex::new(VecDeque::new()));
+            let shutdown_flag = Arc::new(Mutex::new(false));
             // let core_ids: Vec<CoreId> = get_core_ids().expect("Failed to get core IDs");
             // let core_id = core_ids[2];
-            Worker{worker_id, core_id, thread_queue}
+            Worker{worker_id, core_id, thread_queue, shutdown_flag}
         }
 
         pub async fn add_to_queue(&self, jobs:Vec<WasmJob>){
@@ -31,6 +29,11 @@ use std::{collections::VecDeque, sync::Arc};
             for j in jobs.iter(){
                 queue.push_back(j.clone());
             }
+        }
+
+        pub async fn shutdown(&self) {
+            let mut flag = self.shutdown_flag.lock().await;
+            *flag = true;
         }
 
         pub fn store_result<T:std::fmt::Display>(task_id:usize, result:&T){
@@ -127,6 +130,12 @@ use std::{collections::VecDeque, sync::Arc};
         pub async fn start(&self){
             println!("Worker: {:?} started on core id : {:?}", self.worker_id, self.core_id);
             loop{
+                // Check for shutdown signal
+                if *self.shutdown_flag.lock().await {
+                    println!("Worker: {:?} shutting down", self.worker_id);
+                    break;
+                }
+                
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await; // for testing
 
                 // Retrieve the next task from the queue runs it buy awaiting and returns result
