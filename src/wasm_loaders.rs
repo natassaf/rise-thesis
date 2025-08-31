@@ -100,7 +100,7 @@ struct WasmResult {
 
 
 impl WasmComponentLoader{
-    pub fn new()->Self{
+    pub fn new(folder_to_mount:String)->Self{
         println!("Loading wasm component");
 
         // initialize engine
@@ -116,19 +116,23 @@ impl WasmComponentLoader{
             // The linker will call into this to get a `WasiNnView<'_>`
             HostState::wasi_nn_view(host)
         }).context("failed to add wasi-nn to linker").unwrap();
+       let wasi = match folder_to_mount.as_str() {
+            "" => {WasiCtxBuilder::new()
+            .inherit_stdio()
+            .build()}
+            _ => {WasiCtxBuilder::new()
+            .inherit_stdio()
+            .preopened_dir(
+                folder_to_mount.clone(),   // host path
+                folder_to_mount.clone(),  // guest path
+                DirPerms::READ,
+                FilePerms::READ,
+            )
+            .unwrap()
+            .build()
+            }};
 
-        
-        // Initialize store
-        let wasi = WasiCtxBuilder::new()
-        .inherit_stdio()
-        .preopened_dir(
-            "fixture",   // host path
-            "/fixture",  // guest path
-            DirPerms::READ,
-            FilePerms::READ,
-        )
-        .unwrap()
-        .build();
+
 
         // Initialize ONNX backend
         let onnx_backend = Backend::from(OnnxBackend::default());

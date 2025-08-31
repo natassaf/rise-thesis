@@ -63,10 +63,11 @@ fn encode_input(input: &Input) -> Vec<u8> {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WasmJobRequest{
-    pub binary_name: String,
-    pub func_name: String,
-    pub payload: String,
-    pub task_id: usize,
+    binary_name: String,
+    func_name: String,
+    payload: String,
+    task_id: usize,
+    folder_to_mount: String,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +76,7 @@ pub struct Job{
     pub func_name: String,
     pub payload: String,
     pub id: usize,
+    pub folder_to_mount: String,
 }
 
 impl From<WasmJobRequest> for Job {
@@ -87,6 +89,7 @@ impl From<WasmJobRequest> for Job {
             func_name: request.func_name,
             payload: request.payload,
             id: request.task_id,
+            folder_to_mount: request.folder_to_mount,
         }
     }
 }

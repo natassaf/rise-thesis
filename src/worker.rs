@@ -126,11 +126,11 @@ impl Worker{
     //     ()
     // }
     
-    pub async fn run_wasm_job_component(core_id: CoreId, task_id: usize, component_name:String, func_name:String, task_input:String)->task::JoinHandle<Result<Vec<Val>, anyhow::Error>>{
+    pub async fn run_wasm_job_component(core_id: CoreId, task_id: usize, component_name:String, func_name:String, task_input:String, folder_to_mount:String)->task::JoinHandle<Result<Vec<Val>, anyhow::Error>>{
         // Set up Wasmtime engine and module outside blocking
         // let component_name ="math_tasks".to_string();
         println!("Running component {:?}, func: {:?}", component_name, func_name);
-        let mut wasm_loader = WasmComponentLoader::new();
+        let mut wasm_loader = WasmComponentLoader::new(folder_to_mount.clone());
         let func_to_run: wasmtime::component::Func = wasm_loader.load_func(component_name, func_name).await;
         let handler = task::spawn_blocking(move || {
             println!{"Task {task_id} running on core {:?}", core_id.clone()};
@@ -156,11 +156,11 @@ impl Worker{
         handler
     }
 
-    pub async fn  run_job(&self, task_id:usize, binary_path: String, func_name:String, task_input:String ){
+    pub async fn  run_job(&self, task_id:usize, binary_path: String, func_name:String, task_input:String, folder_to_mount:String){
         let core_id: CoreId = self.core_id.clone(); // clone cause we need to pass by value a copy on each thread and it is bound to self
         let task_module_path = binary_path;
         // Spawn a blocking task to map the worker to the core 
-        let handler = Self::run_wasm_job_component(core_id, task_id ,task_module_path, func_name, task_input).await;
+        let handler = Self::run_wasm_job_component(core_id, task_id ,task_module_path, func_name, task_input, folder_to_mount).await;
         // tokio::time::sleep(std::time::Duration::from_secs(20)).await; // for testing
         ()
     }
@@ -186,7 +186,8 @@ impl Worker{
                     let task_id = my_task_1.id.clone(); // for testing
                     let task_input: String = my_task_1.payload.clone();
                     let func_name = my_task_1.func_name.clone();
-                    let _res = self.run_job(task_id, my_task_1.binary_path, func_name, task_input).await;
+                    let folder_to_mount = my_task_1.folder_to_mount.clone();
+                    let _res = self.run_job(task_id, my_task_1.binary_path, func_name, task_input, folder_to_mount).await;
                     ()
                     }
                 }
