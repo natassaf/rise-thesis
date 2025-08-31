@@ -3,7 +3,8 @@ use std::{collections::VecDeque, sync::Arc};
     use core_affinity::{CoreId};
     use serde_json::json;
     use tokio::{sync::Mutex, task};
-use crate::{various::{WasmJob}, wasm_loaders::WasmComponentLoader};
+use crate::various::Job;
+use crate::{various::{WasmJobRequest}, wasm_loaders::WasmComponentLoader};
 use wasmtime::component::Val;
 
 
@@ -11,7 +12,7 @@ use wasmtime::component::Val;
 pub struct Worker{
     worker_id:usize,
     pub core_id:CoreId,
-    thread_queue: Arc<Mutex<VecDeque<WasmJob>>>,
+    thread_queue: Arc<Mutex<VecDeque<Job>>>,
     shutdown_flag: Arc<Mutex<bool>>
 }
 
@@ -48,7 +49,7 @@ impl Worker{
         Worker{worker_id, core_id, thread_queue, shutdown_flag}
     }
 
-    pub async fn add_to_queue(&self, jobs:Vec<WasmJob>){
+    pub async fn add_to_queue(&self, jobs:Vec<Job>){
         let mut queue = self.thread_queue.lock().await;
         for j in jobs.iter(){
             queue.push_back(j.clone());
@@ -125,7 +126,7 @@ impl Worker{
     //     ()
     // }
     
-    pub async fn run_wasm_job_component(core_id: CoreId, task_id: usize, task_input_bytes: Vec<u8>, component_name:String, func_name:String)->task::JoinHandle<Result<Vec<Val>, anyhow::Error>>{
+    pub async fn run_wasm_job_component(core_id: CoreId, task_id: usize, component_name:String, func_name:String, task_input:String)->task::JoinHandle<Result<Vec<Val>, anyhow::Error>>{
         // Set up Wasmtime engine and module outside blocking
         // let component_name ="math_tasks".to_string();
         println!("Running component {:?}, func: {:?}", component_name, func_name);
@@ -155,11 +156,11 @@ impl Worker{
         handler
     }
 
-    pub async fn  run_job(&self, task_id:usize, binary_path: String, func_name:String, task_input:Vec<u8> ){
+    pub async fn  run_job(&self, task_id:usize, binary_path: String, func_name:String, task_input:String ){
         let core_id: CoreId = self.core_id.clone(); // clone cause we need to pass by value a copy on each thread and it is bound to self
         let task_module_path = binary_path;
         // Spawn a blocking task to map the worker to the core 
-        let handler = Self::run_wasm_job_component(core_id, task_id, task_input ,task_module_path, func_name).await;
+        let handler = Self::run_wasm_job_component(core_id, task_id ,task_module_path, func_name, task_input).await;
         // tokio::time::sleep(std::time::Duration::from_secs(20)).await; // for testing
         ()
     }
@@ -178,13 +179,13 @@ impl Worker{
             // Retrieve the next task from the queue runs it buy awaiting and returns result
             let mut queue = self.thread_queue.lock().await; // lock the mutex
             // println!("Worker: {:?} queue: {:?} ", self.worker_id, queue);
-            let my_task:Option<WasmJob> = queue.pop_front();
+            let my_task:Option<Job> = queue.pop_front();
             match my_task{
                 None=> (),
                 Some(my_task_1)=>{
-                    let task_id = my_task_1.job_input.id.clone(); // for testing
-                    let task_input: Vec<u8> = my_task_1.job_input.input.clone();
-                    let func_name = my_task_1.job_input.func_name.clone();
+                    let task_id = my_task_1.id.clone(); // for testing
+                    let task_input: String = my_task_1.payload.clone();
+                    let func_name = my_task_1.func_name.clone();
                     let _res = self.run_job(task_id, my_task_1.binary_path, func_name, task_input).await;
                     ()
                     }

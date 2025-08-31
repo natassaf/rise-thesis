@@ -12,7 +12,7 @@ use tokio::signal;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::scheduler::JobsScheduler;
-use crate::various::{stored_result_decoder, SubmittedJobs, TaskQuery, WasmJob};
+use crate::various::{stored_result_decoder, Job, SubmittedJobs, TaskQuery, WasmJobRequest};
 
 async fn handle_kill(app_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>>)->impl Responder{
     for h in app_data.lock().await.iter(){
@@ -35,9 +35,11 @@ async fn handle_get_result(query: web::Query<TaskQuery>) -> impl Responder {
     }
 }
 
-async fn handle_submit_task(task: web::Json<WasmJob>, submitted_tasks: web::Data<SubmittedJobs>)->impl Responder {
+async fn handle_submit_task(task: web::Json<WasmJobRequest>, submitted_tasks: web::Data<SubmittedJobs>)->impl Responder {
     // Reads the json request and adds the job to the job logger. Returns response immediatelly to client
-    submitted_tasks.add_task(task.into_inner()).await;
+    println!("task: {:?}", task);
+    let job: Job = task.into_inner().into();
+    submitted_tasks.add_task(job).await;
     // tokio::spawn(async move {
     //     scheduler.calculate_task_priorities().await;
     //     // let handles = scheduler.run_tasks_parallel().await;

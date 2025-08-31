@@ -61,52 +61,40 @@ fn encode_input(input: &Input) -> Vec<u8> {
 //     }
 // }
 
-#[derive(Debug, Clone)]
-pub struct WasmJob{
-    pub job_input: JobInput,
-    pub binary_path:String,
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WasmJobRequest{
+    pub binary_name: String,
+    pub func_name: String,
+    pub payload: String,
+    pub task_id: usize,
 }
-
- impl WasmJob{
-
-    pub fn new(binary_path: String, job_input: JobInput) -> Self {
-        WasmJob {
-            binary_path,
-            job_input
-        }
-    }
- }
-
 
 #[derive(Debug, Clone)]
 pub struct Job{
-    pub name:String,
-    pub n: usize,
-    priority: u64,
+    pub binary_path: String,
+    pub func_name: String,
+    pub payload: String,
     pub id: usize,
 }
- 
 
-
-impl<'de> Deserialize<'de> for WasmJob {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let input: JobInput = JobInput::deserialize(deserializer)?;
-        // let binary_path: String = "/home/pi/workspace/wasm-modules/".to_owned()+ input.binary_name.as_str()+ ".wasm";
-        let binary_path: String = "wasm-modules/".to_owned()+ input.binary_name.as_str()+ ".wasm";
-
-        Ok(Self {
-            job_input: input.clone(),
-            binary_path:binary_path
-        })
+impl From<WasmJobRequest> for Job {
+    fn from(request: WasmJobRequest) -> Self {
+        // Construct the binary_path from binary_name
+        let binary_path = format!("wasm-modules/{}", request.binary_name);
+        
+        Job {
+            binary_path,
+            func_name: request.func_name,
+            payload: request.payload,
+            id: request.task_id,
+        }
     }
 }
 
+
 #[derive(Debug, Clone)]
 pub struct SubmittedJobs {
-    pub jobs: Arc<Mutex<Vec<WasmJob>>> ,
+    pub jobs: Arc<Mutex<Vec<Job>>> ,
 }
 
 impl SubmittedJobs{
@@ -117,7 +105,7 @@ impl SubmittedJobs{
 
     pub async fn remove_job(&self, job_id: usize) {
         let mut jobs = self.jobs.lock().await;
-        jobs.retain(|job| job.job_input.id != job_id);
+        jobs.retain(|job| job.id != job_id);
     }
 
     pub async fn get_num_tasks(&self)->usize{
@@ -125,11 +113,11 @@ impl SubmittedJobs{
         guard.await.len()
     }
     
-    pub async fn get_jobs(&self)->Vec<WasmJob>{
+    pub async fn get_jobs(&self)->Vec<Job>{
         self.jobs.lock().await.to_vec()
     }
 
-    pub async fn add_task(&self, task: WasmJob) {
+    pub async fn add_task(&self, task: Job) {
         let mut guard = self.jobs.lock().await;
         guard.push(task);
     }

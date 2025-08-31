@@ -3,21 +3,21 @@
     use actix_web::web;
     use tokio::{time::sleep};
     use tokio::{time::error::Error, task};
-    use crate::{various::{SubmittedJobs, WasmJob}, worker::Worker};
+    use crate::{various::{Job, SubmittedJobs, WasmJobRequest}, worker::Worker};
     use core_affinity::*;
 
 
     // ========== SCHEDULER ==========
     pub struct JobsScheduler{
         submitted_jobs: web::Data<SubmittedJobs>,
-        assigned_jobs: HashMap<usize, Vec<WasmJob>>,
+        assigned_jobs: HashMap<usize, Vec<Job>>,
         workers: Vec<Arc<Worker>>
     }
 
     impl JobsScheduler{
 
         pub fn new(core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>)->Self{
-            let assigned_jobs: HashMap<usize, Vec<WasmJob>> = core_ids[0..2].iter().map(|&val| (val.id, vec![])).collect();
+            let assigned_jobs: HashMap<usize, Vec<Job>> = core_ids[0..2].iter().map(|&val| (val.id, vec![])).collect();
             // let workers = core_ids.iter().map(|core_id| Worker::new(core_id.id, *core_id)).collect();
             let workers: Vec<Arc<Worker>> = core_ids[0..2].iter().map(|core_id| Arc::new(Worker::new(core_id.id, *core_id))).collect();
             JobsScheduler{submitted_jobs, assigned_jobs, workers}
@@ -92,7 +92,7 @@
 
         pub async fn submitted_to_assigned_jobs(
             submitted_jobs: &web::Data<SubmittedJobs>, 
-            assigned_jobs: &mut HashMap<usize, Vec<WasmJob>>
+            assigned_jobs: &mut HashMap<usize, Vec<Job>>
         ) {
             // 1. Get all submitted jobs (pending tasks)
             let mut pending_jobs = submitted_jobs.get_jobs().await;
@@ -102,7 +102,7 @@
             worker_keys.sort();
 
             // 3. Helper function to find best worker key to assign a job
-            fn find_worker_key(assigned_jobs: &HashMap<usize, Vec<WasmJob>>, keys: &[usize]) -> Option<usize> {
+            fn find_worker_key(assigned_jobs: &HashMap<usize, Vec<Job>>, keys: &[usize]) -> Option<usize> {
                 // Prefer empty workers
                 if let Some(empty_key) = keys.iter()
                     .find(|&&key| assigned_jobs.get(&key).map(|v| v.is_empty()).unwrap_or(true))
@@ -123,7 +123,7 @@
 
                     // Remove the job from submitted_jobs storage
                     // Assuming you have a method `remove_job` that accepts job ID and is async
-                    submitted_jobs.remove_job(job.job_input.id).await;
+                    submitted_jobs.remove_job(job.id).await;
                 } else {
                     // No workers available? Could log or break here
                     break;
