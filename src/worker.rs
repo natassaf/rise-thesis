@@ -16,6 +16,14 @@ pub struct Worker{
     shutdown_flag: Arc<Mutex<bool>>
 }
 
+fn input_to_wasm_event_val(input:String) -> wasmtime::component::Val {
+    let event_val = wasmtime::component::Val::String(input.into());
+    let record_fields = vec![
+        ("event".to_string(), event_val)
+    ];
+    wasmtime::component::Val::Record(record_fields.into())
+}
+
 fn create_wasm_event_val_for_matrix() -> wasmtime::component::Val {
     // Define the input matrices as Rust vectors.
     let mat1 = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
@@ -141,7 +149,7 @@ impl Worker{
                 .build()
                 .unwrap();
             
-            let input = vec![create_wasm_event_val_for_matrix()];
+            let input = vec![input_to_wasm_event_val(task_input)];
 
             let result: Result<Vec<Val>, anyhow::Error> = rt.block_on(async {
                 wasm_loader.run_func(input, func_to_run).await
