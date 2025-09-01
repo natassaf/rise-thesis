@@ -67,7 +67,7 @@ pub struct WasmJobRequest{
     func_name: String,
     payload: String,
     task_id: usize,
-    folder_to_mount: String,
+    model_folder_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -89,7 +89,7 @@ impl From<WasmJobRequest> for Job {
             func_name: request.func_name,
             payload: request.payload,
             id: request.task_id,
-            folder_to_mount: request.folder_to_mount,
+            folder_to_mount: "models/".to_string() + &request.model_folder_name,
         }
     }
 }

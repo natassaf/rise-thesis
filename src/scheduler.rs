@@ -1,4 +1,5 @@
     use std::{collections::{HashMap}, sync::Arc, time::Duration};
+    use tokio::sync::Mutex;
 
     use actix_web::web;
     use tokio::{time::sleep};
@@ -18,8 +19,16 @@
 
         pub fn new(core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>)->Self{
             let assigned_jobs: HashMap<usize, Vec<Job>> = core_ids[0..2].iter().map(|&val| (val.id, vec![])).collect();
-            // let workers = core_ids.iter().map(|core_id| Worker::new(core_id.id, *core_id)).collect();
-            let workers: Vec<Arc<Worker>> = core_ids[0..2].iter().map(|core_id| Arc::new(Worker::new(core_id.id, *core_id))).collect();
+            
+            // Create a single shared WasmComponentLoader instance wrapped in Arc<Mutex>
+            // Mount the model_1 directory so ONNX models can be accessed
+            let shared_wasm_loader = Arc::new(Mutex::new(crate::wasm_loaders::WasmComponentLoader::new("models".to_string())));
+            
+            // Create workers with the shared wasm_loader
+            let workers: Vec<Arc<Worker>> = core_ids[0..2].iter().map(|core_id| {
+                Arc::new(Worker::new(core_id.id, *core_id, shared_wasm_loader.clone()))
+            }).collect();
+            
             JobsScheduler{submitted_jobs, assigned_jobs, workers}
         }
 

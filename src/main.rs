@@ -10,6 +10,7 @@ use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use core_affinity::{get_core_ids, CoreId};
 use tokio::signal;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::env;
 
 use crate::scheduler::JobsScheduler;
 use crate::various::{stored_result_decoder, Job, SubmittedJobs, TaskQuery, WasmJobRequest};
@@ -56,6 +57,10 @@ async fn handle_submit_task(task: web::Json<WasmJobRequest>, submitted_tasks: we
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    unsafe {
+        env::set_var("ONNX_DISABLE_SCHEMA_WARNINGS", "1");
+    }
+
     println!("Server started");
     let core_ids: Vec<CoreId> = get_core_ids().expect("Failed to get core IDs");
     println!("core_ids: {:?}", core_ids);

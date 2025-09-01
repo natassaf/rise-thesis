@@ -137,6 +137,7 @@ impl WasmComponentLoader{
         // Initialize ONNX backend
         let onnx_backend = Backend::from(OnnxBackend::default());
         
+        
         let my_registry = InMemoryRegistry::new();
         let registry = Registry::from(my_registry);
         

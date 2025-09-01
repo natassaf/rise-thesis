@@ -13,7 +13,8 @@ pub struct Worker{
     worker_id:usize,
     pub core_id:CoreId,
     thread_queue: Arc<Mutex<VecDeque<Job>>>,
-    shutdown_flag: Arc<Mutex<bool>>
+    shutdown_flag: Arc<Mutex<bool>>,
+    wasm_loader: Arc<Mutex<WasmComponentLoader>>
 }
 
 fn input_to_wasm_event_val(input:String) -> wasmtime::component::Val {
@@ -49,12 +50,12 @@ fn create_wasm_event_val_for_matrix() -> wasmtime::component::Val {
 }
 
 impl Worker{
-    pub fn new(worker_id:usize, core_id:CoreId)->Self{
+    pub fn new(worker_id:usize, core_id:CoreId, wasm_loader: Arc<Mutex<WasmComponentLoader>>)->Self{
         let thread_queue = Arc::new(Mutex::new(VecDeque::new()));
         let shutdown_flag = Arc::new(Mutex::new(false));
         // let core_ids: Vec<CoreId> = get_core_ids().expect("Failed to get core IDs");
         // let core_id = core_ids[2];
-        Worker{worker_id, core_id, thread_queue, shutdown_flag}
+        Worker{worker_id, core_id, thread_queue, shutdown_flag, wasm_loader}
     }
 
     pub async fn add_to_queue(&self, jobs:Vec<Job>){
@@ -134,12 +135,15 @@ impl Worker{
     //     ()
     // }
     
-    pub async fn run_wasm_job_component(core_id: CoreId, task_id: usize, component_name:String, func_name:String, task_input:String, folder_to_mount:String)->task::JoinHandle<Result<Vec<Val>, anyhow::Error>>{
+    pub async fn run_wasm_job_component(core_id: CoreId, task_id: usize, component_name:String, func_name:String, task_input:String, folder_to_mount:String, shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>)->task::JoinHandle<Result<Vec<Val>, anyhow::Error>>{
         // Set up Wasmtime engine and module outside blocking
         // let component_name ="math_tasks".to_string();
         println!("Running component {:?}, func: {:?}", component_name, func_name);
-        let mut wasm_loader = WasmComponentLoader::new(folder_to_mount.clone());
-        let func_to_run: wasmtime::component::Func = wasm_loader.load_func(component_name, func_name).await;
+        
+        // Use the shared wasm_loader instead of creating a new one
+        let func_to_run: wasmtime::component::Func = shared_wasm_loader.lock().await.load_func(component_name, func_name).await;
+        
+        let shared_wasm_loader_clone = shared_wasm_loader.clone();
         let handler = task::spawn_blocking(move || {
             println!{"Task {task_id} running on core {:?}", core_id.clone()};
             core_affinity::set_for_current(core_id);
@@ -151,8 +155,8 @@ impl Worker{
             
             let input = vec![input_to_wasm_event_val(task_input)];
 
-            let result: Result<Vec<Val>, anyhow::Error> = rt.block_on(async {
-                wasm_loader.run_func(input, func_to_run).await
+            let result: Result<Vec<Val>, anyhow::Error> = rt.block_on(async move {
+                shared_wasm_loader_clone.lock().await.run_func(input, func_to_run).await
             });
             match &result {
                 Ok(val) => Self::store_result(task_id, &format!("{:?}", val)),
@@ -168,7 +172,7 @@ impl Worker{
         let core_id: CoreId = self.core_id.clone(); // clone cause we need to pass by value a copy on each thread and it is bound to self
         let task_module_path = binary_path;
         // Spawn a blocking task to map the worker to the core 
-        let handler = Self::run_wasm_job_component(core_id, task_id ,task_module_path, func_name, task_input, folder_to_mount).await;
+        let handler = Self::run_wasm_job_component(core_id, task_id ,task_module_path, func_name, task_input, folder_to_mount, self.wasm_loader.clone()).await;
         // tokio::time::sleep(std::time::Duration::from_secs(20)).await; // for testing
         ()
     }
