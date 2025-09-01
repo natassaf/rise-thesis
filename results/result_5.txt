@@ -1,1 +1,0 @@
-Result: [Record([("output", String("n02099601 golden retriever: 0.99509, n02088094 Afghan hound, Afghan: 0.00238, n02102318 cocker spaniel, English cocker spaniel, cocker: 0.00108"))])]

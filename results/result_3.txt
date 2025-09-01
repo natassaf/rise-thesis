@@ -1,1 +1,19 @@
-Result: [Record([("output", String("n02099601 golden retriever: 0.99509, n02088094 Afghan hound, Afghan: 0.00238, n02102318 cocker spaniel, English cocker spaniel, cocker: 0.00108"))])]
+Result: Error: error while executing at wasm backtrace:
+    0:  0x4008b - <unknown>!<wasm function 479>
+    1:  0x3a1f7 - <unknown>!<wasm function 392>
+    2:  0x39f98 - <unknown>!<wasm function 386>
+    3:  0x33009 - <unknown>!<wasm function 326>
+    4:  0x32fff - <unknown>!<wasm function 325>
+    5:  0x3a1a0 - <unknown>!<wasm function 390>
+    6:  0x39db8 - <unknown>!<wasm function 383>
+    7:  0x3c533 - <unknown>!<wasm function 436>
+    8:  0x3c46d - <unknown>!<wasm function 435>
+    9:  0x1cac2 - <unknown>!<wasm function 179>
+   10:   0x4fc5 - <unknown>!<wasm function 68>
+   11:   0x8bef - <unknown>!<wasm function 113>
+   12:   0x3baf - <unknown>!<wasm function 57>
+   13:   0xcb54 - <unknown>!<wasm function 136>
+   14:  0x1bde5 - <unknown>!<wasm function 159>
+
+Caused by:
+    wasm trap: wasm `unreachable` instruction executed

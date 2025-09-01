@@ -1,1 +1,1 @@
-Result: [Record([("output", String("n02099601 golden retriever: 0.99509, n02088094 Afghan hound, Afghan: 0.00238, n02102318 cocker spaniel, English cocker spaniel, cocker: 0.00108"))])]
+Result: [Record([("output", String("n02397096 warthog: 0.72153, n02117135 hyena, hyaena: 0.06953, n02408429 water buffalo, water ox, Asiatic buffalo, Bubalus bubalis: 0.06514"))])]

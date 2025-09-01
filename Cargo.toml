@@ -23,6 +23,8 @@ wasmtime-wasi-nn = { git = "https://github.com/natassaf/wasmtime.git", package =
 wit-parser = "0.236"
 serde_json = "1.0.142"
 serde = "1.0.219"
+flate2 = "1.0"
+base64 = "0.21"
 
 [profile.release]
 lto = true

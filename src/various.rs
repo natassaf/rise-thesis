@@ -4,35 +4,51 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::sync::atomic::{AtomicU64};
+use flate2::read::GzDecoder;
+use std::io::Read;
+use base64::{Engine as _, engine::general_purpose};
 
 static TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Decompress a gzip-compressed base64 payload
+fn decompress_gzip_payload(compressed_base64: &str) -> Result<String, Box<dyn std::error::Error>> {
+    // Decode base64 to get compressed bytes
+    let compressed_bytes = general_purpose::STANDARD.decode(compressed_base64)?;
+    
+    // Decompress using gzip
+    let mut decoder = GzDecoder::new(&compressed_bytes[..]);
+    let mut decompressed = String::new();
+    decoder.read_to_string(&mut decompressed)?;
+    
+    Ok(decompressed)
+}
 
 #[derive(Deserialize)]
 pub struct TaskQuery {
     pub id: usize,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Encode)]
-#[serde(untagged)]
-pub enum Input {
-    U64(u64),
-    F64(f64),
-    ListU64(Vec<u64>),
-    ListF32(Vec<f32>),
-}
+// #[derive(Serialize, Deserialize, Debug, Clone, Encode)]
+// #[serde(untagged)]
+// pub enum Input {
+//     U64(u64),
+//     F64(f64),
+//     ListU64(Vec<u64>),
+//     ListF32(Vec<f32>),
+// }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct JobInput {
-    pub func_name: String,
-    pub input: Vec<u8>,
-    pub id: usize,
-    pub binary_name: String
-}
+// #[derive(Clone, Debug, Deserialize)]
+// pub struct JobInput {
+//     pub func_name: String,
+//     pub input: Vec<u8>,
+//     pub id: usize,
+//     pub binary_name: String
+// }
 
-fn encode_input(input: &Input) -> Vec<u8> {
-    let config = standard();
-    encode_to_vec(input, config).expect("Failed to encode input")
-}
+// fn encode_input(input: &Input) -> Vec<u8> {
+//     let config = standard();
+//     encode_to_vec(input, config).expect("Failed to encode input")
+// }
 
 // // Custom Deserialize for JobInput to encode `input` dynamically
 // impl<'de> Deserialize<'de> for JobInput {
@@ -66,6 +82,7 @@ pub struct WasmJobRequest{
     binary_name: String,
     func_name: String,
     payload: String,
+    payload_compressed: bool,
     task_id: usize,
     model_folder_name: String,
 }
@@ -84,10 +101,23 @@ impl From<WasmJobRequest> for Job {
         // Construct the binary_path from binary_name
         let binary_path = format!("wasm-modules/{}", request.binary_name);
         
+        // Decompress payload if it's compressed
+        let payload = if request.payload_compressed {
+            match decompress_gzip_payload(&request.payload) {
+                Ok(decompressed) => decompressed,
+                Err(e) => {
+                    eprintln!("Failed to decompress payload: {}", e);
+                    request.payload // Fallback to original payload
+                }
+            }
+        } else {
+            request.payload
+        };
+        
         Job {
             binary_path,
             func_name: request.func_name,
-            payload: request.payload,
+            payload,
             id: request.task_id,
             folder_to_mount: "models/".to_string() + &request.model_folder_name,
         }
