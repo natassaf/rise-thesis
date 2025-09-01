@@ -1,1 +1,0 @@
-Result: [Record([("output", String("n02397096 warthog: 0.72153, n02117135 hyena, hyaena: 0.06953, n02408429 water buffalo, water ox, Asiatic buffalo, Bubalus bubalis: 0.06514"))])]

@@ -1,6 +1,5 @@
 mod various;
 mod scheduler;
-mod all_tasks;
 mod worker;
 mod wasm_loaders;
 use std::{sync::Arc};
@@ -13,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::env;
 
 use crate::scheduler::JobsScheduler;
-use crate::various::{stored_result_decoder, Job, SubmittedJobs, TaskQuery, WasmJobRequest};
+use crate::various::{Job, SubmittedJobs, TaskQuery, WasmJobRequest};
 
 async fn handle_kill(app_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>>)->impl Responder{
     for h in app_data.lock().await.iter(){
@@ -29,16 +28,41 @@ async fn handle_execute_tasks(app_data: web::Data<Arc<Mutex<JobsScheduler>>>)->i
 }
 
 async fn handle_get_result(query: web::Query<TaskQuery>) -> impl Responder {
-    println!("Running get result");
-    match stored_result_decoder(query.id) {
-        Some(result) => HttpResponse::Ok().body(format!("Result: {}", result)),
-        None => HttpResponse::NotFound().body("Result not found"),
+    println!("Running get result for task {}", query.id);
+    
+    // Return compressed result
+    let compressed_path = format!("results/result_{}.gz", query.id);
+    let uncompressed_path = format!("results/result_{}.txt", query.id);
+    
+    // Try compressed file first
+    match std::fs::read(&compressed_path) {
+        Ok(compressed_data) => {
+            HttpResponse::Ok()
+                .append_header(("Content-Type", "application/gzip"))
+                .append_header(("Content-Encoding", "gzip"))
+                .append_header(("Content-Disposition", format!("attachment; filename=\"result_{}.gz\"", query.id)))
+                .body(compressed_data)
+        },
+        Err(_) => {
+            // Fallback to uncompressed file
+            match std::fs::read(&uncompressed_path) {
+                Ok(uncompressed_data) => {
+                    HttpResponse::Ok()
+                        .header("Content-Type", "text/plain")
+                        .header("Content-Disposition", format!("attachment; filename=\"result_{}.txt\"", query.id))
+                        .body(uncompressed_data)
+                },
+                Err(_) => {
+                    HttpResponse::NotFound().body("Result not found")
+                }
+            }
+        }
     }
 }
 
 async fn handle_submit_task(task: web::Json<WasmJobRequest>, submitted_tasks: web::Data<SubmittedJobs>)->impl Responder {
     // Reads the json request and adds the job to the job logger. Returns response immediatelly to client
-    println!("task: {:?}", task);
+    // println!("task: {:?}", task);
     let job: Job = task.into_inner().into();
     submitted_tasks.add_task(job).await;
     // tokio::spawn(async move {

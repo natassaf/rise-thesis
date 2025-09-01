@@ -1,11 +1,13 @@
 use std::usize;
 use std::{collections::VecDeque, sync::Arc};
-    use core_affinity::{CoreId};
-    use serde_json::json;
-    use tokio::{sync::Mutex, task};
+use core_affinity::{CoreId};
+use serde_json::json;
+use tokio::{sync::Mutex, task};
 use crate::various::Job;
 use crate::{various::{WasmJobRequest}, wasm_loaders::WasmComponentLoader};
 use wasmtime::component::Val;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 
 
 // Worker is mapped to a core id and runs the tasks located in each queue
@@ -71,9 +73,26 @@ impl Worker{
     }
 
     pub fn store_result<T:std::fmt::Display>(task_id:usize, result:&T){
-        // Store result in a file named after the task
-        let file_name = format!("results/result_{}.txt", task_id);
-        std::fs::write(&file_name, format!("Result: {}", result)).expect("Failed to write result to file");
+        // Store compressed result in a file named after the task
+        let file_name = format!("results/result_{}.gz", task_id);
+        
+        // Format the result
+        let result_string = format!("Result: {}", result);
+        
+        // Compress the result using gzip
+        let mut compressed_data = Vec::new();
+        {
+            let mut encoder = GzEncoder::new(&mut compressed_data, Compression::default());
+            std::io::Write::write_all(&mut encoder, result_string.as_bytes())
+                .expect("Failed to compress result");
+            encoder.finish().expect("Failed to finish compression");
+        }
+        
+        // Write the compressed data to file
+        std::fs::write(&file_name, &compressed_data).expect("Failed to write compressed result to file");
+        
+        println!("Stored compressed result for task {}: {} bytes -> {} bytes", 
+                 task_id, result_string.len(), compressed_data.len());
     }
 
     // pub async fn run_job(core_id: CoreId, task_id: usize, task_n: usize)->task::JoinHandle<Value>{

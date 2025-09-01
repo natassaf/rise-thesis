@@ -161,41 +161,16 @@ impl SubmittedJobs{
 use std::fs::{self, File};
 use std::io::{self, BufWriter, ErrorKind};
 
-pub fn stored_result_decoder(id: usize) -> Option<String> {
-    /*
-        Function that knows the format of the stored results and decodes them into String
-    */
-    let path = format!("results/result_{}.txt", id);
+
+/// Decompress gzip result data
+fn decompress_gzip_result(compressed_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
     
-    match fs::read_to_string(&path) {
-        Ok(content) => {
-            // Expect format: "Result: <value>"
-            if let Some(line) = content.lines().find(|line| line.starts_with("Result: ")) {
-                Some(line.trim_start_matches("Result: ").trim().to_string())
-            } else {
-                None
-            }
-        },
-        Err(e) => {
-            match e.kind() {
-                ErrorKind::NotFound => None,
-                _ => {
-                    eprintln!("Error reading result file {}: {:?}", path, e);
-                    None
-                }
-            }
-        }
-    }
+    let mut decoder = GzDecoder::new(compressed_data);
+    let mut decompressed = String::new();
+    decoder.read_to_string(&mut decompressed)?;
+    
+    Ok(decompressed)
 }
 
-pub fn store_encoded_result<T: Serialize>(
-        numbers: &[T],
-        file_path: &str,
-    ) -> std::io::Result<()> {
-        let file = File::create(file_path)?;
-        let writer = BufWriter::new(file);
-
-        serde_json::to_writer(writer, numbers) // Serialize directly to the writer
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("JSON serialization failed: {}", e)))?;
-        Ok(())
-    }

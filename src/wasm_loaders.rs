@@ -184,7 +184,7 @@ impl WasmComponentLoader{
 
         let input_args = input;
         func.call_async(&mut self.store, &input_args, &mut results).await?;
-        println!("load result {:?}", results);
+        // println!("load result {:?}", results);
         return Ok(results)
     }
 }
