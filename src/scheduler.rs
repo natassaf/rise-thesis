@@ -1,108 +1,20 @@
-    use std::{collections::{HashMap}, sync::Arc, time::Duration};
+    use std::{collections::{HashMap}, sync::Arc};
     use tokio::sync::Mutex;
 
     use actix_web::web;
-    use tokio::{time::sleep};
     use tokio::{time::error::Error, task};
-    use crate::{various::{Job, SubmittedJobs, WasmJobRequest}, worker::Worker};
+    use crate::{various::{Job, SubmittedJobs}, worker::Worker};
     use core_affinity::*;
 
-
-    // ========== SCHEDULER ==========
-    pub struct JobsScheduler{
-        submitted_jobs: web::Data<SubmittedJobs>,
-        assigned_jobs: HashMap<usize, Vec<Job>>,
-        workers: Vec<Arc<Worker>>
+    pub struct BaselineStaticSchedulerAlgorithm{
     }
 
-    impl JobsScheduler{
-
-        pub fn new(core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>)->Self{
-            let assigned_jobs: HashMap<usize, Vec<Job>> = core_ids[0..2].iter().map(|&val| (val.id, vec![])).collect();
-            
-            // Create a single shared WasmComponentLoader instance wrapped in Arc<Mutex>
-            // Mount the model_1 directory so ONNX models can be accessed
-            let shared_wasm_loader = Arc::new(Mutex::new(crate::wasm_loaders::WasmComponentLoader::new("models".to_string())));
-            
-            // Create workers with the shared wasm_loader
-            let workers: Vec<Arc<Worker>> = core_ids[0..2].iter().map(|core_id| {
-                Arc::new(Worker::new(core_id.id, *core_id, shared_wasm_loader.clone()))
-            }).collect();
-            
-            JobsScheduler{submitted_jobs, assigned_jobs, workers}
+    impl BaselineStaticSchedulerAlgorithm{
+        pub fn new()->Self{
+            Self{}
         }
-
-        pub async fn start_scheduler(&mut self)-> Result<Vec<tokio::task::JoinHandle<()>>, Error>{
-            let mut handlers:Vec<tokio::task::JoinHandle<()>> = vec![];
-            // start all workers
-            for worker in &self.workers {
-                let worker = Arc::clone(worker);
-                
-                // This blocks the thread and pins it to the core
-                let handler = task::spawn_blocking(move || {
-                    // Pin to the correct core
-                    core_affinity::set_for_current(worker.core_id);
-
-                    // Create a local runtime just for this thread
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .unwrap();
-
-                    // Run the worker's async logic on this pinned thread
-                    rt.block_on(async move {
-                        worker.start().await;
-                    });
-                });
-                handlers.push(handler);
-            }
-            
-            Ok(handlers)
-            // self.execute_jobs_continuously().await;
-        }
-
-        pub async fn execute_jobs(&mut self){
-            Self::submitted_to_assigned_jobs(&self.submitted_jobs, &mut self.assigned_jobs).await;
-                // println!("Jobs to assign: {:?}", self.assigned_jobs);
-                for (k,v) in self.assigned_jobs.iter(){
-                    self.workers[*k].add_to_queue(v.clone()).await;
-                }
-                
-                for jobs in self.assigned_jobs.values_mut() {
-                    jobs.clear();
-                }
-        }
-
-        pub async fn shutdown(&mut self) {
-            println!("Shutting down scheduler and all workers...");
-            for worker in &self.workers {
-                worker.shutdown().await;
-            }
-        }
-
-
-
-        pub async fn execute_jobs_continuously(&mut self)->Result<(), Error>{
-            loop {
-                println!("Checking for new tasks");
-                println!("Num of submitted tasks: {:?}", self.submitted_jobs.get_num_tasks().await);
-                Self::submitted_to_assigned_jobs(&self.submitted_jobs, &mut self.assigned_jobs).await;
-                // println!("Jobs to assign: {:?}", self.assigned_jobs);
-                for (k,v) in self.assigned_jobs.iter(){
-                    self.workers[*k].add_to_queue(v.clone()).await;
-                }
-                
-                for jobs in self.assigned_jobs.values_mut() {
-                    jobs.clear();
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-        }
-
-        pub async fn submitted_to_assigned_jobs(
-            submitted_jobs: &web::Data<SubmittedJobs>, 
-            assigned_jobs: &mut HashMap<usize, Vec<Job>>
-        ) {
+        
+        pub async fn schedule_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>, assigned_jobs: &mut HashMap<usize, Vec<Job>>){
             // 1. Get all submitted jobs (pending tasks)
             let mut pending_jobs = submitted_jobs.get_jobs().await;
 
@@ -140,6 +52,102 @@
             }
         }
 
+    }
+
+
+    // ========== SCHEDULER ==========
+    pub struct SchedulerEngine{
+        submitted_jobs: web::Data<SubmittedJobs>,
+        assigned_jobs: HashMap<usize, Vec<Job>>,
+        workers: Vec<Arc<Worker>>,
+        scheduler_algo: BaselineStaticSchedulerAlgorithm,
+    }
+
+    impl SchedulerEngine{
+
+        pub fn new(core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>,  num_workers_to_start: usize)->Self{
+            
+            let assigned_jobs: HashMap<usize, Vec<Job>> = core_ids[0..num_workers_to_start].iter().map(|&val| (val.id, vec![])).collect();
+            
+            // Create a single shared WasmComponentLoader instance wrapped in Arc<Mutex>
+            // Mount the model_1 directory so ONNX models can be accessed
+            let shared_wasm_loader = Arc::new(Mutex::new(crate::wasm_loaders::WasmComponentLoader::new("models".to_string())));
+            
+            // Create workers with the shared wasm_loader
+            let workers: Vec<Arc<Worker>> = core_ids[0..num_workers_to_start].iter().map(|core_id| {
+                Arc::new(Worker::new(core_id.id, *core_id, shared_wasm_loader.clone()))
+            }).collect();
+            
+            let scheduler_algo = BaselineStaticSchedulerAlgorithm::new();
+            SchedulerEngine{submitted_jobs, assigned_jobs, workers, scheduler_algo}
+        }
+
+        pub async fn start_scheduler(&mut self)-> Result<Vec<tokio::task::JoinHandle<()>>, Error>{
+            let mut handlers:Vec<tokio::task::JoinHandle<()>> = vec![];
+            // start all workers
+            for worker in &self.workers {
+                let worker = worker.clone();
+                
+                // This blocks the thread and pins it to the core
+                let handler = task::spawn_blocking(move || {
+                    // Pin to the correct core
+                    core_affinity::set_for_current(worker.core_id);
+
+                    // Create a local runtime just for this thread
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    // Run the worker's async logic on this pinned thread
+                    rt.block_on(async move {
+                        worker.start().await;
+                    });
+                });
+                handlers.push(handler);
+            }
+            
+            Ok(handlers)
+            // self.execute_jobs_continuously().await;
+        }
+
+        pub async fn execute_jobs(&mut self){
+            self.scheduler_algo.schedule_tasks(&self.submitted_jobs, &mut self.assigned_jobs).await;
+                // println!("Jobs to assign: {:?}", self.assigned_jobs);
+                for (k,v) in self.assigned_jobs.iter(){
+                    self.workers[*k].add_to_queue(v.clone()).await;
+                }
+                
+                for jobs in self.assigned_jobs.values_mut() {
+                    jobs.clear();
+                }
+        }
+
+        pub async fn shutdown(&mut self) {
+            println!("Shutting down scheduler and all workers...");
+            for worker in &self.workers {
+                worker.shutdown().await;
+            }
+        }
+
+
+
+        pub async fn execute_jobs_continuously(&mut self)->Result<(), Error>{
+            loop {
+                println!("Checking for new tasks");
+                println!("Num of submitted tasks: {:?}", self.submitted_jobs.get_num_tasks().await);
+                self.scheduler_algo.schedule_tasks(&self.submitted_jobs, &mut self.assigned_jobs).await;
+                // println!("Jobs to assign: {:?}", self.assigned_jobs);
+                for (k,v) in self.assigned_jobs.iter(){
+                    self.workers[*k].add_to_queue(v.clone()).await;
+                }
+                
+                for jobs in self.assigned_jobs.values_mut() {
+                    jobs.clear();
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
 
     }
 

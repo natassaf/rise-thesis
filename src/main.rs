@@ -9,9 +9,8 @@ use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use core_affinity::{get_core_ids, CoreId};
 use tokio::signal;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::env;
 
-use crate::scheduler::JobsScheduler;
+use crate::scheduler::SchedulerEngine;
 use crate::various::{Job, SubmittedJobs, TaskQuery, WasmJobRequest};
 
 async fn handle_kill(app_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>>)->impl Responder{
@@ -21,7 +20,7 @@ async fn handle_kill(app_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<(
     HttpResponse::Ok().body(format!("Workers killed"))
 }
 
-async fn handle_execute_tasks(app_data: web::Data<Arc<Mutex<JobsScheduler>>>)->impl Responder{
+async fn handle_execute_tasks(app_data: web::Data<Arc<Mutex<SchedulerEngine>>>)->impl Responder{
     let mut scheduler = app_data.lock().await;
     scheduler.execute_jobs().await;
     HttpResponse::Ok().body(format!("Executing tasks"))
@@ -48,8 +47,8 @@ async fn handle_get_result(query: web::Query<TaskQuery>) -> impl Responder {
             match std::fs::read(&uncompressed_path) {
                 Ok(uncompressed_data) => {
                     HttpResponse::Ok()
-                        .header("Content-Type", "text/plain")
-                        .header("Content-Disposition", format!("attachment; filename=\"result_{}.txt\"", query.id))
+                        .append_header(("Content-Type", "text/plain"))
+                        .append_header(("Content-Disposition", format!("attachment; filename=\"result_{}.txt\"", query.id)))
                         .body(uncompressed_data)
                 },
                 Err(_) => {
@@ -62,36 +61,22 @@ async fn handle_get_result(query: web::Query<TaskQuery>) -> impl Responder {
 
 async fn handle_submit_task(task: web::Json<WasmJobRequest>, submitted_tasks: web::Data<SubmittedJobs>)->impl Responder {
     // Reads the json request and adds the job to the job logger. Returns response immediatelly to client
-    // println!("task: {:?}", task);
+    // println!("task: {:?}", task); # line to be removed
     let job: Job = task.into_inner().into();
     submitted_tasks.add_task(job).await;
-    // tokio::spawn(async move {
-    //     scheduler.calculate_task_priorities().await;
-    //     // let handles = scheduler.run_tasks_parallel().await;
-    //     // for handle in handles {
-    //     //     match handle.await {
-    //     //         Ok(result) => {println!("Task completed with result: {}", result);}
-    //     //         Err(e) => {eprintln!("Task failed: {}", e);}
-    //     //     }
-    //     // }    
-    // });
     println!("Number of tasks waiting: {:?}", submitted_tasks.get_num_tasks().await);
     HttpResponse::Ok().body("Task submitted")
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    unsafe {
-        env::set_var("ONNX_DISABLE_SCHEMA_WARNINGS", "1");
-    }
-
     println!("Server started");
     let core_ids: Vec<CoreId> = get_core_ids().expect("Failed to get core IDs");
     println!("core_ids: {:?}", core_ids);
 
     // Global shutdown flag
     static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
-
+    let num_workers_to_start = 2;
     // Initialize scheduler object and job logger 
     // Wrapped in web::Data so that we configure them as shared resources across HTTPServer threads 
     let jobs_log: web::Data<SubmittedJobs> = web::Data::new(SubmittedJobs::new());
@@ -99,8 +84,8 @@ async fn main() -> std::io::Result<()> {
     // Wrapped arouns Arc so that we keep one instance in the Heap and when doing .clone we only clone pointers
     // Mutex is needed cause some instance fields are mutable across threads
     let scheduler = { 
-        let scheduler = Arc::new( Mutex::new(JobsScheduler::new(core_ids, jobs_log.clone())));
-        let scheduler_data: web::Data<Arc<Mutex<JobsScheduler>>> = web::Data::new(scheduler.clone()); 
+        let scheduler = Arc::new( Mutex::new(SchedulerEngine::new(core_ids, jobs_log.clone(), num_workers_to_start)));
+        let scheduler_data: web::Data<Arc<Mutex<SchedulerEngine>>> = web::Data::new(scheduler.clone()); 
         scheduler_data
     };
     
@@ -142,6 +127,7 @@ async fn main() -> std::io::Result<()> {
     .shutdown_timeout(5) // 5 seconds timeout for graceful shutdown
     .run();
 
+    // ******* ENABLES SHUTDOWN *******
     // Wait for either the server to complete or a shutdown signal
     tokio::select! {
         result = server => {

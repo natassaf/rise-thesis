@@ -154,7 +154,7 @@ impl Worker{
     //     ()
     // }
     
-    pub async fn run_wasm_job_component(core_id: CoreId, task_id: usize, component_name:String, func_name:String, task_input:String, folder_to_mount:String, shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>)->task::JoinHandle<Result<Vec<Val>, anyhow::Error>>{
+    pub async fn run_wasm_job_component(core_id: CoreId, task_id: usize, component_name:String, func_name:String, payload:String, folder_to_mount:String, shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>)->task::JoinHandle<Result<Vec<Val>, anyhow::Error>>{
         // Set up Wasmtime engine and module outside blocking
         // let component_name ="math_tasks".to_string();
         println!("Running component {:?}, func: {:?}", component_name, func_name);
@@ -172,7 +172,7 @@ impl Worker{
                 .build()
                 .unwrap();
             
-            let input = vec![input_to_wasm_event_val(task_input)];
+            let input = vec![input_to_wasm_event_val(payload)];
 
             let result: Result<Vec<Val>, anyhow::Error> = rt.block_on(async move {
                 shared_wasm_loader_clone.lock().await.run_func(input, func_to_run).await
@@ -187,11 +187,11 @@ impl Worker{
         handler
     }
 
-    pub async fn  run_job(&self, task_id:usize, binary_path: String, func_name:String, task_input:String, folder_to_mount:String){
+    pub async fn  run_job(&self, task_id:usize, binary_path: String, func_name:String, payload:String, folder_to_mount:String){
         let core_id: CoreId = self.core_id.clone(); // clone cause we need to pass by value a copy on each thread and it is bound to self
         let task_module_path = binary_path;
         // Spawn a blocking task to map the worker to the core 
-        let handler = Self::run_wasm_job_component(core_id, task_id ,task_module_path, func_name, task_input, folder_to_mount, self.wasm_loader.clone()).await;
+        let handler = Self::run_wasm_job_component(core_id, task_id ,task_module_path, func_name, payload, folder_to_mount, self.wasm_loader.clone()).await;
         // tokio::time::sleep(std::time::Duration::from_secs(20)).await; // for testing
         ()
     }
@@ -215,10 +215,10 @@ impl Worker{
                 None=> (),
                 Some(my_task_1)=>{
                     let task_id = my_task_1.id.clone(); // for testing
-                    let task_input: String = my_task_1.payload.clone();
+                    let payload: String = my_task_1.payload.clone();
                     let func_name = my_task_1.func_name.clone();
                     let folder_to_mount = my_task_1.folder_to_mount.clone();
-                    let _res = self.run_job(task_id, my_task_1.binary_path, func_name, task_input, folder_to_mount).await;
+                    let _res = self.run_job(task_id, my_task_1.binary_path, func_name, payload, folder_to_mount).await;
                     ()
                     }
                 }

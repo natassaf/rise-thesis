@@ -1,14 +1,10 @@
-use bincode::config::standard;
-use bincode::{encode_to_vec, Encode};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::sync::atomic::{AtomicU64};
 use flate2::read::GzDecoder;
 use std::io::Read;
 use base64::{Engine as _, engine::general_purpose};
 
-static TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Decompress a gzip-compressed base64 payload
 fn decompress_gzip_payload(compressed_base64: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -94,6 +90,7 @@ pub struct Job{
     pub payload: String,
     pub id: usize,
     pub folder_to_mount: String,
+    pub status: String,
 }
 
 impl From<WasmJobRequest> for Job {
@@ -120,6 +117,7 @@ impl From<WasmJobRequest> for Job {
             payload,
             id: request.task_id,
             folder_to_mount: "models/".to_string() + &request.model_folder_name,
+            status:"waiting".to_string(),
         }
     }
 }

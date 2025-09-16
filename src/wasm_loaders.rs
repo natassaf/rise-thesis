@@ -2,7 +2,6 @@
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use wasmtime::*;
-use wasmtime_wasi::preview1::{WasiP1Ctx};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::p2::{self, IoView, WasiCtx, WasiCtxBuilder, WasiView};
 use wasmtime_wasi_nn::wit::{add_to_linker as add_wasi_nn};
@@ -12,6 +11,7 @@ use wasmtime_wasi_nn::{InMemoryRegistry, Registry};
 use wasmtime_wasi_nn::Backend;
 use wasmtime_wasi::{DirPerms, FilePerms};
 use wasmtime_wasi_nn::backend::onnx::OnnxBackend;
+
 // pub struct ModuleWasmLoader{
 //     engine:Engine,
 //     //  pub store: Store<WasiP1Ctx>,
@@ -62,6 +62,7 @@ use wasmtime_wasi_nn::backend::onnx::OnnxBackend;
 //         (loaded_func, memory)
 //     }
 // }
+
 struct HostState {
     wasi: WasiCtx,
     table: wasmtime::component::ResourceTable,
@@ -89,8 +90,8 @@ impl IoView for HostState {
 pub struct WasmComponentLoader{
     engine:Engine,
     //  pub store: Store<WasiP1Ctx>,
-    pub store: Store<HostState>,
-    pub linker: Linker<HostState>,
+    store: Store<HostState>,
+    linker: Linker<HostState>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -113,7 +114,6 @@ impl WasmComponentLoader{
         p2::add_to_linker_async(&mut linker).context("add_to_linker_async failed").unwrap();
         // Add wasm-nn support
         add_wasi_nn(&mut linker, |host: &mut HostState| {
-            // The linker will call into this to get a `WasiNnView<'_>`
             HostState::wasi_nn_view(host)
         }).context("failed to add wasi-nn to linker").unwrap();
        let wasi = match folder_to_mount.as_str() {
@@ -169,9 +169,6 @@ impl WasmComponentLoader{
         let func: Func = instance
             .get_func(&mut self.store, &func_name)
             .ok_or_else(|| anyhow!("exported function `{func_name}` not found")).unwrap();
-
-        // 6) Prepare results buffer with the right length; types/initial values are ignored by Wasmtime.
-
 
         return func;
     }
