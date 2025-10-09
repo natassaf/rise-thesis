@@ -72,6 +72,22 @@ impl Worker{
         *flag = true;
     }
 
+    pub fn store_result_uncompressed<T:std::fmt::Display>(task_id:usize, result:&T){
+        // Store compressed result in a file named after the task
+        let file_name = format!("results/result_{}.txt", task_id);
+        
+        // Format the result
+        let result_string = format!("Result: {}", result);
+        
+        
+        // Write the compressed data to file
+        std::fs::write(&file_name, &result_string).expect("Failed to write compressed result to file");
+        
+        println!("Stored result for task {}: {} ", 
+                 task_id, result_string.len());
+    }
+
+
     pub fn store_result<T:std::fmt::Display>(task_id:usize, result:&T){
         // Store compressed result in a file named after the task
         let file_name = format!("results/result_{}.gz", task_id);
@@ -178,8 +194,8 @@ impl Worker{
                 shared_wasm_loader_clone.lock().await.run_func(input, func_to_run).await
             });
             match &result {
-                Ok(val) => Self::store_result(task_id, &format!("{:?}", val)),
-                Err(e) => Self::store_result(task_id, &format!("Error: {:?}", e)),
+                Ok(val) => Self::store_result_uncompressed(task_id, &format!("{:?}", val)),
+                Err(e) => Self::store_result_uncompressed(task_id, &format!("Error: {:?}", e)),
             }
             println!("Finished wasm task {}", task_id);
             result

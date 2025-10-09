@@ -97,7 +97,6 @@ impl From<WasmJobRequest> for Job {
     fn from(request: WasmJobRequest) -> Self {
         // Construct the binary_path from binary_name
         let binary_path = format!("wasm-modules/{}", request.binary_name);
-        
         // Decompress payload if it's compressed
         let payload = if request.payload_compressed {
             match decompress_gzip_payload(&request.payload) {
