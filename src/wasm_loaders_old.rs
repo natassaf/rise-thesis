@@ -1,17 +1,78 @@
+
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use wasmtime::*;
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::p2::{self, IoView, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi_nn::wit::{add_to_linker as add_wasi_nn};
+use wasmtime_wasi_nn::wit::{ WasiNnCtx, WasiNnView};
 use wasmtime::component::{Component, Func, Linker, Val};
+use wasmtime_wasi_nn::{InMemoryRegistry, Registry};
+use wasmtime_wasi_nn::Backend;
 use wasmtime_wasi::{DirPerms, FilePerms};
+use wasmtime_wasi_nn::backend::onnx::OnnxBackend;
+
+// pub struct ModuleWasmLoader{
+//     engine:Engine,
+//     //  pub store: Store<WasiP1Ctx>,
+//     pub store: Store<()>,
+//     pub linker: Option<Linker<WasiP1Ctx>>,
+// }
+
+// impl ModuleWasmLoader{
+
+//     // pub fn new_async(data:())->Self{
+//     //     println!("Loading wasm module");
+//     //     let args = std::env::args().skip(1).collect::<Vec<_>>();
+//     //     let mut config = Config::new();
+//     //     config.async_support(true);
+//     //     let engine = Engine::new(&config).unwrap();
+//     //     let mut linker: Linker<WasiP1Ctx> = Linker::new(&engine);
+//     //     preview1::add_to_linker_async(&mut linker, |t| t);
+
+//     //     let wasi_ctx = WasiCtxBuilder::new()
+//     //         .inherit_stdio()
+//     //         .inherit_env()
+//     //         .args(&args)
+//     //         .build_p1();
+
+//     //     let  store = Store::new(&engine, wasi_ctx);
+//     //     Self {engine, store, linker}
+//     // }
+
+//     pub fn new(data:())->Self{
+//         println!("Loading wasm module");
+//         let engine = Engine::default();
+//         let mut store = Store::new(&engine, ());
+//         Self {engine, store, linker:None}
+//     }
+
+    
+//     pub fn load<I:WasmParams, O:WasmResults>(&mut self, path_to_module:String, func_name:String)->(TypedFunc<I, O>, Memory ){
+//         let module = Module::from_file(&self.engine, path_to_module).unwrap();
+//         let instance = Instance::new(&mut self.store, &module, &[]).unwrap();
+//         // let module = Module::from_file(&self.engine, path_to_module).unwrap();
+//         // let pre = self.linker.instantiate_pre(&module).unwrap();
+//         // let instance = pre.instantiate(&mut self.store).unwrap();
+//         // let instance = self.linker.instantiate_async(&mut self.store, &module).await.unwrap();
+
+//         // memory stuff
+//         let memory = instance.get_memory(&mut self.store, "memory").expect("No `memory` export found in Wasm module");
+//         let loaded_func = instance.get_typed_func::<I, O>(&mut self.store, &func_name).unwrap();
+//         (loaded_func, memory)
+//     }
+// }
 
 struct HostState {
     wasi: WasiCtx,
     table: wasmtime::component::ResourceTable,
+    wasi_nn: WasiNnCtx,
 }
 
 impl HostState {
+    fn wasi_nn_view(&mut self) -> WasiNnView<'_> {
+        WasiNnView::new(&mut self.table, &mut self.wasi_nn)
+    }
 }
 
 impl WasiView for HostState {
@@ -51,6 +112,10 @@ impl WasmComponentLoader{
         // initialize linker
         let mut linker: Linker<HostState> = Linker::new(&engine);
         p2::add_to_linker_async(&mut linker).context("add_to_linker_async failed").unwrap();
+        // Add wasm-nn support
+        add_wasi_nn(&mut linker, |host: &mut HostState| {
+            HostState::wasi_nn_view(host)
+        }).context("failed to add wasi-nn to linker").unwrap();
        let wasi = match folder_to_mount.as_str() {
             "" => {WasiCtxBuilder::new()
             .inherit_stdio()
@@ -67,11 +132,24 @@ impl WasmComponentLoader{
             .build()
             }};
 
+
+
+        // Initialize ONNX backend
+        let onnx_backend = Backend::from(OnnxBackend::default());
+        
+        
+        let my_registry = InMemoryRegistry::new();
+        let registry = Registry::from(my_registry);
+        
+        // Create the WasiNnCtx with the ONNX backend
+        let wasi_nn = WasiNnCtx::new(vec![onnx_backend], registry);
+
         let store: Store<HostState> = Store::new(
             &engine,
             HostState {
                 wasi,
                 table: wasmtime::component::ResourceTable::new(),
+                wasi_nn,
             },
         );
 

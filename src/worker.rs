@@ -4,10 +4,26 @@ use core_affinity::{CoreId};
 use serde_json::json;
 use tokio::{sync::Mutex, task};
 use crate::various::Job;
-use crate::{various::{WasmJobRequest}, wasm_loaders::WasmComponentLoader};
+use crate::wasm_loaders::WasmComponentLoader;
 use wasmtime::component::Val;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use flate2::read::GzDecoder;
+use std::io::Read;
+use base64::{Engine as _, engine::general_purpose};
+
+/// Decompress a gzip-compressed base64 payload
+fn decompress_payload(compressed_base64: &str) -> Result<String, Box<dyn std::error::Error>> {
+    // Decode base64 to get compressed bytes
+    let compressed_bytes = general_purpose::STANDARD.decode(compressed_base64)?;
+    
+    // Decompress using gzip
+    let mut decoder = GzDecoder::new(&compressed_bytes[..]);
+    let mut decompressed = String::new();
+    decoder.read_to_string(&mut decompressed)?;
+    
+    Ok(decompressed)
+}
 
 
 // Worker is mapped to a core id and runs the tasks located in each queue
@@ -72,7 +88,7 @@ impl Worker{
         *flag = true;
     }
 
-    pub fn store_result_uncompressed<T:std::fmt::Display>(task_id:usize, result:&T){
+    pub fn store_result_uncompressed<T:std::fmt::Display>(task_id:&str, result:&T){
         // Store compressed result in a file named after the task
         let file_name = format!("results/result_{}.txt", task_id);
         
@@ -88,7 +104,7 @@ impl Worker{
     }
 
 
-    pub fn store_result<T:std::fmt::Display>(task_id:usize, result:&T){
+    pub fn store_result<T:std::fmt::Display>(task_id:&str, result:&T){
         // Store compressed result in a file named after the task
         let file_name = format!("results/result_{}.gz", task_id);
         
@@ -170,7 +186,7 @@ impl Worker{
     //     ()
     // }
     
-    pub async fn run_wasm_job_component(core_id: CoreId, task_id: usize, component_name:String, func_name:String, payload:String, folder_to_mount:String, shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>)->task::JoinHandle<Result<Vec<Val>, anyhow::Error>>{
+    pub async fn run_wasm_job_component(core_id: CoreId, task_id: String, component_name:String, func_name:String, payload:String, folder_to_mount:String, shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>)->task::JoinHandle<Result<Vec<Val>, anyhow::Error>>{
         // Set up Wasmtime engine and module outside blocking
         // let component_name ="math_tasks".to_string();
         println!("Running component {:?}, func: {:?}", component_name, func_name);
@@ -194,8 +210,8 @@ impl Worker{
                 shared_wasm_loader_clone.lock().await.run_func(input, func_to_run).await
             });
             match &result {
-                Ok(val) => Self::store_result_uncompressed(task_id, &format!("{:?}", val)),
-                Err(e) => Self::store_result_uncompressed(task_id, &format!("Error: {:?}", e)),
+                Ok(val) => Self::store_result_uncompressed(&task_id, &format!("{:?}", val)),
+                Err(e) => Self::store_result_uncompressed(&task_id, &format!("Error: {:?}", e)),
             }
             println!("Finished wasm task {}", task_id);
             result
@@ -203,7 +219,7 @@ impl Worker{
         handler
     }
 
-    pub async fn  run_job(&self, task_id:usize, binary_path: String, func_name:String, payload:String, folder_to_mount:String){
+    pub async fn  run_job(&self, task_id:String, binary_path: String, func_name:String, payload:String, folder_to_mount:String){
         let core_id: CoreId = self.core_id.clone(); // clone cause we need to pass by value a copy on each thread and it is bound to self
         let task_module_path = binary_path;
         // Spawn a blocking task to map the worker to the core 
@@ -231,7 +247,18 @@ impl Worker{
                 None=> (),
                 Some(my_task_1)=>{
                     let task_id = my_task_1.id.clone(); // for testing
-                    let payload: String = my_task_1.payload.clone();
+                    // Decompress payload if needed (moved from handler to avoid blocking)
+                    let payload: String = if my_task_1.payload_compressed {
+                        match decompress_payload(&my_task_1.payload) {
+                            Ok(decompressed) => decompressed,
+                            Err(e) => {
+                                eprintln!("Failed to decompress payload for task {}: {}", task_id, e);
+                                my_task_1.payload.clone() // Fallback to original
+                            }
+                        }
+                    } else {
+                        my_task_1.payload.clone()
+                    };
                     let func_name = my_task_1.func_name.clone();
                     let folder_to_mount = my_task_1.folder_to_mount.clone();
                     let _res = self.run_job(task_id, my_task_1.binary_path, func_name, payload, folder_to_mount).await;

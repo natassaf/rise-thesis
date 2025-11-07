@@ -116,7 +116,16 @@ async fn main() -> std::io::Result<()> {
 
     // Create server with graceful shutdown
     let server = HttpServer::new(move || {
-        let mut app = App::new().app_data(jobs_log.clone()).app_data(scheduler.clone()).app_data(handlers_data.clone()) ;
+        // Configure JSON payload size limit (default is 256KB, increase to 100MB for large image payloads)
+        let json_config = web::JsonConfig::default()
+            .limit(100 * 1024 * 1024) // 100MB limit for JSON payloads
+            .content_type_required(false); // Allow different content types if needed
+        
+        let mut app = App::new()
+            .app_data(json_config) // Apply JSON config globally
+            .app_data(jobs_log.clone())
+            .app_data(scheduler.clone())
+            .app_data(handlers_data.clone());
         app = app.route("/submit_task", web::post().to(handle_submit_task));
         app = app.route("/get_result", web::get().to(handle_get_result));
         app = app.route("/run_tasks", web::get().to(handle_execute_tasks));

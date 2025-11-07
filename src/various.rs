@@ -21,7 +21,7 @@ fn decompress_gzip_payload(compressed_base64: &str) -> Result<String, Box<dyn st
 
 #[derive(Deserialize)]
 pub struct TaskQuery {
-    pub id: usize,
+    pub id: String,
 }
 
 // #[derive(Serialize, Deserialize, Debug, Clone, Encode)]
@@ -79,7 +79,7 @@ pub struct WasmJobRequest{
     func_name: String,
     payload: String,
     payload_compressed: bool,
-    task_id: usize,
+    task_id: String,
     model_folder_name: String,
 }
 
@@ -88,7 +88,8 @@ pub struct Job{
     pub binary_path: String,
     pub func_name: String,
     pub payload: String,
-    pub id: usize,
+    pub payload_compressed: bool, // Track if payload needs decompression
+    pub id: String,
     pub folder_to_mount: String,
     pub status: String,
 }
@@ -97,23 +98,14 @@ impl From<WasmJobRequest> for Job {
     fn from(request: WasmJobRequest) -> Self {
         // Construct the binary_path from binary_name
         let binary_path = format!("wasm-modules/{}", request.binary_name);
-        // Decompress payload if it's compressed
-        let payload = if request.payload_compressed {
-            match decompress_gzip_payload(&request.payload) {
-                Ok(decompressed) => decompressed,
-                Err(e) => {
-                    eprintln!("Failed to decompress payload: {}", e);
-                    request.payload // Fallback to original payload
-                }
-            }
-        } else {
-            request.payload
-        };
+        // DON'T decompress here - do it in the worker to avoid blocking the handler
+        // This prevents connection timeouts when handling large compressed payloads
         
         Job {
             binary_path,
             func_name: request.func_name,
-            payload,
+            payload: request.payload, // Store compressed payload as-is
+            payload_compressed: request.payload_compressed, // Remember if it needs decompression
             id: request.task_id,
             folder_to_mount: "models/".to_string() + &request.model_folder_name,
             status:"waiting".to_string(),
@@ -133,14 +125,14 @@ impl SubmittedJobs{
         Self{jobs: tasks}
     }
 
-    pub async fn remove_job(&self, job_id: usize) {
+    pub async fn remove_job(&self, job_id: String) {
         let mut jobs = self.jobs.lock().await;
         jobs.retain(|job| job.id != job_id);
     }
 
     pub async fn get_num_tasks(&self)->usize{
-        let guard = self.jobs.lock();
-        guard.await.len()
+        let guard = self.jobs.lock().await;
+        guard.len()
     }
     
     pub async fn get_jobs(&self)->Vec<Job>{
