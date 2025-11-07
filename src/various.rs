@@ -92,6 +92,7 @@ pub struct Job{
     pub id: String,
     pub folder_to_mount: String,
     pub status: String,
+    pub arrival_time: std::time::SystemTime, // Track when job was submitted for sorting
 }
 
 impl From<WasmJobRequest> for Job {
@@ -109,6 +110,7 @@ impl From<WasmJobRequest> for Job {
             id: request.task_id,
             folder_to_mount: "models/".to_string() + &request.model_folder_name,
             status:"waiting".to_string(),
+            arrival_time: std::time::SystemTime::now(), // Record arrival time for sorting
         }
     }
 }
@@ -116,7 +118,7 @@ impl From<WasmJobRequest> for Job {
 
 #[derive(Debug, Clone)]
 pub struct SubmittedJobs {
-    pub jobs: Arc<Mutex<Vec<Job>>> ,
+    pub jobs: Arc<Mutex<Vec<Job>>>,
 }
 
 impl SubmittedJobs{
@@ -137,6 +139,18 @@ impl SubmittedJobs{
     
     pub async fn get_jobs(&self)->Vec<Job>{
         self.jobs.lock().await.to_vec()
+    }
+
+    // Get and remove the next job from the queue (for workers to pull jobs)
+    // Pops from the front (oldest first after sorting)
+    pub async fn pop_next_job(&self) -> Option<Job> {
+        let mut jobs = self.jobs.lock().await;
+        // Pop from front (oldest first after sorting)
+        if jobs.is_empty() {
+            None
+        } else {
+            Some(jobs.remove(0))
+        }
     }
 
     pub async fn add_task(&self, task: Job) {

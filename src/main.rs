@@ -61,7 +61,6 @@ async fn handle_get_result(query: web::Query<TaskQuery>) -> impl Responder {
 
 async fn handle_submit_task(task: web::Json<WasmJobRequest>, submitted_tasks: web::Data<SubmittedJobs>)->impl Responder {
     // Reads the json request and adds the job to the job logger. Returns response immediatelly to client
-    // println!("task: {:?}", task); # line to be removed
     let job: Job = task.into_inner().into();
     submitted_tasks.add_task(job).await;
     println!("Number of tasks waiting: {:?}", submitted_tasks.get_num_tasks().await);

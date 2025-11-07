@@ -1,8 +1,8 @@
 use std::usize;
-use std::{collections::VecDeque, sync::Arc};
+use std::sync::Arc;
 use core_affinity::{CoreId};
 use serde_json::json;
-use tokio::{sync::Mutex, task};
+use tokio::{sync::{Mutex, Notify}, task};
 use crate::various::Job;
 use crate::wasm_loaders::WasmComponentLoader;
 use wasmtime::component::Val;
@@ -26,13 +26,14 @@ fn decompress_payload(compressed_base64: &str) -> Result<String, Box<dyn std::er
 }
 
 
-// Worker is mapped to a core id and runs the tasks located in each queue
+// Worker is mapped to a core id and runs the tasks from SubmittedJobs
 pub struct Worker{
     worker_id:usize,
     pub core_id:CoreId,
-    thread_queue: Arc<Mutex<VecDeque<Job>>>,
+    submitted_jobs: actix_web::web::Data<crate::various::SubmittedJobs>, // Reference to submitted jobs
     shutdown_flag: Arc<Mutex<bool>>,
-    wasm_loader: Arc<Mutex<WasmComponentLoader>>
+    wasm_loader: Arc<Mutex<WasmComponentLoader>>,
+    execution_notify: Arc<Notify>, // Wait for signal to start processing
 }
 
 fn input_to_wasm_event_val(input:String) -> wasmtime::component::Val {
@@ -68,19 +69,9 @@ fn create_wasm_event_val_for_matrix() -> wasmtime::component::Val {
 }
 
 impl Worker{
-    pub fn new(worker_id:usize, core_id:CoreId, wasm_loader: Arc<Mutex<WasmComponentLoader>>)->Self{
-        let thread_queue = Arc::new(Mutex::new(VecDeque::new()));
+    pub fn new(worker_id:usize, core_id:CoreId, wasm_loader: Arc<Mutex<WasmComponentLoader>>, submitted_jobs: actix_web::web::Data<crate::various::SubmittedJobs>, execution_notify: Arc<Notify>)->Self{
         let shutdown_flag = Arc::new(Mutex::new(false));
-        // let core_ids: Vec<CoreId> = get_core_ids().expect("Failed to get core IDs");
-        // let core_id = core_ids[2];
-        Worker{worker_id, core_id, thread_queue, shutdown_flag, wasm_loader}
-    }
-
-    pub async fn add_to_queue(&self, jobs:Vec<Job>){
-        let mut queue = self.thread_queue.lock().await;
-        for j in jobs.iter(){
-            queue.push_back(j.clone());
-        }
+        Worker{worker_id, core_id, submitted_jobs, shutdown_flag, wasm_loader, execution_notify}
     }
 
     pub async fn shutdown(&self) {
@@ -237,40 +228,48 @@ impl Worker{
                 break;
             }
             
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await; // for testing
-
-            // Retrieve the next task from the queue runs it buy awaiting and returns result
-            let mut queue = self.thread_queue.lock().await; // lock the mutex
-            // println!("Worker: {:?} queue: {:?} ", self.worker_id, queue);
-            let my_task:Option<Job> = queue.pop_front();
-            match my_task{
-                None=> (),
-                Some(my_task_1)=>{
-                    let task_id = my_task_1.id.clone(); // for testing
-                    // Decompress payload if needed (moved from handler to avoid blocking)
-                    let payload: String = if my_task_1.payload_compressed {
-                        match decompress_payload(&my_task_1.payload) {
-                            Ok(decompressed) => decompressed,
-                            Err(e) => {
-                                eprintln!("Failed to decompress payload for task {}: {}", task_id, e);
-                                my_task_1.payload.clone() // Fallback to original
+            // Wait for signal to start processing (from execute_jobs endpoint)
+            self.execution_notify.notified().await;
+            
+            // Process all available tasks until queue is empty
+            loop {
+                // Check for shutdown signal
+                if *self.shutdown_flag.lock().await {
+                    println!("Worker: {:?} shutting down", self.worker_id);
+                    return;
+                }
+                
+                // Retrieve the next task from SubmittedJobs (pops it out, removing it from storage)
+                let my_task: Option<Job> = self.submitted_jobs.pop_next_job().await;
+                
+                match my_task{
+                    None=> {
+                        // No more tasks available, wait for next execution signal
+                        break;
+                    },
+                    Some(my_task_1)=>{
+                        let task_id = my_task_1.id.clone();
+                        // Decompress payload if needed (moved from handler to avoid blocking)
+                        let payload: String = if my_task_1.payload_compressed {
+                            match decompress_payload(&my_task_1.payload) {
+                                Ok(decompressed) => decompressed,
+                                Err(e) => {
+                                    eprintln!("Failed to decompress payload for task {}: {}", task_id, e);
+                                    my_task_1.payload.clone() // Fallback to original
+                                }
                             }
-                        }
-                    } else {
-                        my_task_1.payload.clone()
-                    };
-                    let func_name = my_task_1.func_name.clone();
-                    let folder_to_mount = my_task_1.folder_to_mount.clone();
-                    let _res = self.run_job(task_id, my_task_1.binary_path, func_name, payload, folder_to_mount).await;
-                    ()
+                        } else {
+                            my_task_1.payload.clone()
+                        };
+                        let func_name = my_task_1.func_name.clone();
+                        let folder_to_mount = my_task_1.folder_to_mount.clone();
+                        let _res = self.run_job(task_id, my_task_1.binary_path, func_name, payload, folder_to_mount).await;
+                        ()
                     }
                 }
             }
         }
+    }
 }
-
-
-
-
 
 

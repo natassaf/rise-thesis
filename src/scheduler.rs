@@ -1,9 +1,9 @@
-    use std::{collections::{HashMap}, sync::Arc};
-    use tokio::sync::Mutex;
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, Notify};
 
     use actix_web::web;
     use tokio::{time::error::Error, task};
-    use crate::{various::{Job, SubmittedJobs}, worker::Worker};
+    use crate::{various::SubmittedJobs, worker::Worker};
     use core_affinity::*;
 
     pub struct BaselineStaticSchedulerAlgorithm{
@@ -14,42 +14,21 @@
             Self{}
         }
         
-        pub async fn schedule_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>, assigned_jobs: &mut HashMap<usize, Vec<Job>>){
-            // 1. Get all submitted jobs (pending tasks)
-            let mut pending_jobs = submitted_jobs.get_jobs().await;
+        pub async fn schedule_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>) {
+            // Sort jobs by arrival time (oldest first) so workers process them in order
+            let job_ids_before: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
+            println!("Sorting jobs by arrival time before: {:?}", job_ids_before);
 
-            // 2. Sort keys of assigned_jobs ascending to break ties by lowest key
-            let mut worker_keys: Vec<usize> = assigned_jobs.keys().cloned().collect();
-            worker_keys.sort();
+            self.sort_by_arrival_time(submitted_jobs).await;
 
-            // 3. Helper function to find best worker key to assign a job
-            fn find_worker_key(assigned_jobs: &HashMap<usize, Vec<Job>>, keys: &[usize]) -> Option<usize> {
-                // Prefer empty workers
-                if let Some(empty_key) = keys.iter()
-                    .find(|&&key| assigned_jobs.get(&key).map(|v| v.is_empty()).unwrap_or(true))
-                {
-                    return Some(*empty_key);
-                }
+            let job_ids_after: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
+            println!("Sorting jobs by arrival time after: {:?}", job_ids_after);
+        }
 
-                // Otherwise find worker with least jobs
-                keys.iter()
-                    .min_by_key(|&&key| assigned_jobs.get(&key).map(|v| v.len()).unwrap_or(usize::MAX))
-                    .copied()
-            }
-
-            // 4. Assign each pending job to a worker and remove it from submitted jobs
-            for job in pending_jobs.drain(..) {
-                if let Some(worker_key) = find_worker_key(&assigned_jobs, &worker_keys) {
-                    assigned_jobs.entry(worker_key).or_default().push(job.clone());
-
-                    // Remove the job from submitted_jobs storage
-                    // Assuming you have a method `remove_job` that accepts job ID and is async
-                    submitted_jobs.remove_job(job.id).await;
-                } else {
-                    // No workers available? Could log or break here
-                    break;
-                }
-            }
+        // Sort jobs by arrival time (oldest first)
+        async fn sort_by_arrival_time(&self, submitted_jobs: &web::Data<SubmittedJobs>) {
+            let mut jobs = submitted_jobs.jobs.lock().await;
+            jobs.sort_by(|a, b| a.arrival_time.cmp(&b.arrival_time));
         }
 
     }
@@ -58,28 +37,29 @@
     // ========== SCHEDULER ==========
     pub struct SchedulerEngine{
         submitted_jobs: web::Data<SubmittedJobs>,
-        assigned_jobs: HashMap<usize, Vec<Job>>,
         workers: Vec<Arc<Worker>>,
         scheduler_algo: BaselineStaticSchedulerAlgorithm,
+        execution_notify: Arc<Notify>, // Signal to workers to start processing
     }
 
     impl SchedulerEngine{
 
         pub fn new(core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>,  num_workers_to_start: usize)->Self{
             
-            let assigned_jobs: HashMap<usize, Vec<Job>> = core_ids[0..num_workers_to_start].iter().map(|&val| (val.id, vec![])).collect();
+            // Create a notification mechanism to signal workers when to process tasks
+            let execution_notify = Arc::new(Notify::new());
             
             // Create a single shared WasmComponentLoader instance wrapped in Arc<Mutex>
             // Mount the model_1 directory so ONNX models can be accessed
             let shared_wasm_loader = Arc::new(Mutex::new(crate::wasm_loaders::WasmComponentLoader::new("models".to_string())));
             
-            // Create workers with the shared wasm_loader
+            // Create workers with the shared wasm_loader, reference to submitted_jobs, and execution_notify
             let workers: Vec<Arc<Worker>> = core_ids[0..num_workers_to_start].iter().map(|core_id| {
-                Arc::new(Worker::new(core_id.id, *core_id, shared_wasm_loader.clone()))
+                Arc::new(Worker::new(core_id.id, *core_id, shared_wasm_loader.clone(), submitted_jobs.clone(), execution_notify.clone()))
             }).collect();
             
             let scheduler_algo = BaselineStaticSchedulerAlgorithm::new();
-            SchedulerEngine{submitted_jobs, assigned_jobs, workers, scheduler_algo}
+            SchedulerEngine{submitted_jobs, workers, scheduler_algo, execution_notify}
         }
 
         pub async fn start_scheduler(&mut self)-> Result<Vec<tokio::task::JoinHandle<()>>, Error>{
@@ -112,15 +92,10 @@
         }
 
         pub async fn execute_jobs(&mut self){
-            self.scheduler_algo.schedule_tasks(&self.submitted_jobs, &mut self.assigned_jobs).await;
-                // println!("Jobs to assign: {:?}", self.assigned_jobs);
-                for (k,v) in self.assigned_jobs.iter(){
-                    self.workers[*k].add_to_queue(v.clone()).await;
-                }
-                
-                for jobs in self.assigned_jobs.values_mut() {
-                    jobs.clear();
-                }
+            // Schedule tasks: sort by arrival time
+            self.scheduler_algo.schedule_tasks(&self.submitted_jobs).await;
+            // Notify all workers to start processing tasks
+            self.execution_notify.notify_waiters();
         }
 
         pub async fn shutdown(&mut self) {
@@ -136,15 +111,7 @@
             loop {
                 println!("Checking for new tasks");
                 println!("Num of submitted tasks: {:?}", self.submitted_jobs.get_num_tasks().await);
-                self.scheduler_algo.schedule_tasks(&self.submitted_jobs, &mut self.assigned_jobs).await;
-                // println!("Jobs to assign: {:?}", self.assigned_jobs);
-                for (k,v) in self.assigned_jobs.iter(){
-                    self.workers[*k].add_to_queue(v.clone()).await;
-                }
-                
-                for jobs in self.assigned_jobs.values_mut() {
-                    jobs.clear();
-                }
+                self.scheduler_algo.schedule_tasks(&self.submitted_jobs).await;
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         }
