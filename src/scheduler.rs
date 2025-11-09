@@ -1,9 +1,10 @@
     use std::sync::Arc;
+    use std::collections::HashMap;
     use tokio::sync::{Mutex, Notify};
 
     use actix_web::web;
     use tokio::{time::error::Error, task};
-    use crate::{various::SubmittedJobs, worker::Worker};
+    use crate::{various::{Job, SubmittedJobs}, worker::Worker};
     use core_affinity::*;
 
     pub struct BaselineStaticSchedulerAlgorithm{
@@ -14,7 +15,7 @@
             Self{}
         }
         
-        pub async fn schedule_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>) {
+        pub async fn prioritize_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>) {
             // Sort jobs by arrival time (oldest first) so workers process them in order
             let job_ids_before: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
             println!("Sorting jobs by arrival time before: {:?}", job_ids_before);
@@ -33,6 +34,19 @@
 
     }
 
+    // Standalone function to store evaluation metrics to file
+    fn store_evaluation_metrics(total_tasks: usize, total_time_secs: f64, total_time_ms: f64, avg_time_ms: f64, throughput: f64) {
+        let metrics_content = format!(
+            "Total tasks processed: {}\nTotal execution time: {:.2} seconds ({:.2} ms)\nAverage time per task: {:.2} ms\nThroughput: {:.2} tasks/second\n",
+            total_tasks, total_time_secs, total_time_ms, avg_time_ms, throughput
+        );
+        
+        if let Err(e) = std::fs::write("results/evaluation_metrics.txt", metrics_content) {
+            eprintln!("Failed to write evaluation metrics to file: {}", e);
+        } else {
+            println!("Evaluation metrics written to results/evaluation_metrics.txt");
+        }
+    }
 
     // ========== SCHEDULER ==========
     pub struct SchedulerEngine{
@@ -40,6 +54,9 @@
         workers: Vec<Arc<Worker>>,
         scheduler_algo: BaselineStaticSchedulerAlgorithm,
         execution_notify: Arc<Notify>, // Signal to workers to start processing
+        task_status: Arc<Mutex<HashMap<String, u8>>>, // HashMap: task_id -> 0 (not processed) or 1 (processed)
+        completed_count: Arc<Mutex<usize>>, // Counter for completed tasks
+        execution_start_time: Arc<Mutex<Option<std::time::Instant>>>, // Track when execution starts
     }
 
     impl SchedulerEngine{
@@ -59,10 +76,23 @@
             }).collect();
             
             let scheduler_algo = BaselineStaticSchedulerAlgorithm::new();
-            SchedulerEngine{submitted_jobs, workers, scheduler_algo, execution_notify}
+            SchedulerEngine{
+                submitted_jobs, 
+                workers, 
+                scheduler_algo, 
+                execution_notify,
+                task_status: Arc::new(Mutex::new(HashMap::new())),
+                completed_count: Arc::new(Mutex::new(0)),
+                execution_start_time: Arc::new(Mutex::new(None)),
+            }
         }
 
-        pub async fn start_scheduler(&mut self)-> Result<Vec<tokio::task::JoinHandle<()>>, Error>{
+        pub async fn start_scheduler(&mut self, scheduler_arc: Arc<Mutex<SchedulerEngine>>)-> Result<Vec<tokio::task::JoinHandle<()>>, Error>{
+            // Set scheduler reference in workers so they can notify on completion
+            for worker in &self.workers {
+                worker.set_scheduler(scheduler_arc.clone()).await;
+            }
+            
             let mut handlers:Vec<tokio::task::JoinHandle<()>> = vec![];
             // start all workers
             for worker in &self.workers {
@@ -91,12 +121,103 @@
             // self.execute_jobs_continuously().await;
         }
 
+        async fn initialize_task_status(&mut self, jobs:&Vec<Job>){
+            let mut task_status = self.task_status.lock().await;
+            task_status.clear();
+            for job in jobs.iter() {
+                task_status.insert(job.id.clone(), 0); // 0 = not processed
+            }
+            drop(task_status);
+
+        }
         pub async fn execute_jobs(&mut self){
+            
+            // Record start time
+            let start_time = std::time::Instant::now();
+            *self.execution_start_time.lock().await = Some(start_time);
+            
+            // Get all current tasks and initialize HashMap (all set to 0 = not processed)
+            let jobs = self.submitted_jobs.get_jobs().await;
+
+            self.initialize_task_status(&jobs).await;
+
+            // Initialize completed counter
+            *self.completed_count.lock().await = 0;
+            
+            println!("=== Execution started at {:?} with {} tasks ===", start_time, jobs.len());
+            
             // Schedule tasks: sort by arrival time
-            self.scheduler_algo.schedule_tasks(&self.submitted_jobs).await;
+            self.scheduler_algo.prioritize_tasks(&self.submitted_jobs).await;
             // Notify all workers to start processing tasks
             self.execution_notify.notify_waiters();
         }
+
+        // Called by workers when a task completes (push notification)
+        pub async fn on_task_completed(&self, task_id: String) {
+            let mut task_status = self.task_status.lock().await;
+            
+            // Check if task was already marked as completed (avoid double counting)
+            if let Some(status) = task_status.get(&task_id) {
+                if *status == 0 {
+                    // Mark as processed
+                    task_status.insert(task_id.clone(), 1);
+                    drop(task_status);
+                    
+                    // Increment completed counter
+                    let mut completed = self.completed_count.lock().await;
+                    *completed += 1;
+                    let completed_count = *completed;
+                    drop(completed);
+                    
+                    // Get total tasks
+                    let total_tasks = {
+                        let status = self.task_status.lock().await;
+                        status.len()
+                    };
+                    
+                    // Check if all tasks are complete
+                    if completed_count >= total_tasks {
+                        // All tasks completed - calculate and print timing
+                        let start_time_opt = {
+                            *self.execution_start_time.lock().await
+                        };
+                        
+                        if let Some(start_time) = start_time_opt {
+                            let elapsed = start_time.elapsed();
+                            let total_time_secs = elapsed.as_secs_f64();
+                            let total_time_ms = elapsed.as_millis() as f64;
+                            let avg_time_ms = if total_tasks > 0 {
+                                total_time_ms / total_tasks as f64
+                            } else {
+                                0.0
+                            };
+                            let throughput = if total_time_secs > 0.0 {
+                                total_tasks as f64 / total_time_secs
+                            } else {
+                                0.0
+                            };
+                            
+                            println!("=== Execution completed ===");
+                            println!("Total tasks processed: {}", total_tasks);
+                            println!("Total execution time: {:.2} seconds ({:.2} ms)", total_time_secs, total_time_ms);
+                            if total_tasks > 0 {
+                                println!("Average time per task: {:.2} ms", avg_time_ms);
+                            }
+                            println!("Throughput: {:.2} tasks/second", throughput);
+                            
+                            // Store metrics to file
+                            store_evaluation_metrics(total_tasks, total_time_secs, total_time_ms, avg_time_ms, throughput);
+                            
+                            // Reset timing for next execution
+                            *self.execution_start_time.lock().await = None;
+                            self.task_status.lock().await.clear();
+                            *self.completed_count.lock().await = 0;
+                        }
+                    }
+                }
+            }
+        }
+
 
         pub async fn shutdown(&mut self) {
             println!("Shutting down scheduler and all workers...");
@@ -111,7 +232,7 @@
             loop {
                 println!("Checking for new tasks");
                 println!("Num of submitted tasks: {:?}", self.submitted_jobs.get_num_tasks().await);
-                self.scheduler_algo.schedule_tasks(&self.submitted_jobs).await;
+                self.scheduler_algo.prioritize_tasks(&self.submitted_jobs).await;
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         }

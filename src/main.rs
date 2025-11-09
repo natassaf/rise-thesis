@@ -97,7 +97,8 @@ async fn main() -> std::io::Result<()> {
 
     // Store the scheduler handle so we can abort it on shutdown
     let scheduler_handle = tokio::spawn(async move {
-        match scheduler_for_spawn.lock().await.start_scheduler().await {
+        let scheduler_arc = scheduler_for_spawn.get_ref().clone();
+        match scheduler_for_spawn.lock().await.start_scheduler(scheduler_arc).await {
             Ok(handles) => {
                 let mut wh = worker_handlers_for_spawn.lock().await;
                 *wh = handles;

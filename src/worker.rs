@@ -3,7 +3,7 @@ use std::sync::Arc;
 use core_affinity::{CoreId};
 use serde_json::json;
 use tokio::{sync::{Mutex, Notify}, task};
-use crate::various::Job;
+use crate::{scheduler::SchedulerEngine, various::Job};
 use crate::wasm_loaders::WasmComponentLoader;
 use wasmtime::component::Val;
 use flate2::write::GzEncoder;
@@ -34,6 +34,7 @@ pub struct Worker{
     shutdown_flag: Arc<Mutex<bool>>,
     wasm_loader: Arc<Mutex<WasmComponentLoader>>,
     execution_notify: Arc<Notify>, // Wait for signal to start processing
+    scheduler: Arc<Mutex<Option<Arc<Mutex<SchedulerEngine>>>>>, // Reference to scheduler for completion notification
 }
 
 fn input_to_wasm_event_val(input:String) -> wasmtime::component::Val {
@@ -71,7 +72,12 @@ fn create_wasm_event_val_for_matrix() -> wasmtime::component::Val {
 impl Worker{
     pub fn new(worker_id:usize, core_id:CoreId, wasm_loader: Arc<Mutex<WasmComponentLoader>>, submitted_jobs: actix_web::web::Data<crate::various::SubmittedJobs>, execution_notify: Arc<Notify>)->Self{
         let shutdown_flag = Arc::new(Mutex::new(false));
-        Worker{worker_id, core_id, submitted_jobs, shutdown_flag, wasm_loader, execution_notify}
+        let scheduler = Arc::new(Mutex::new(None));
+        Worker{worker_id, core_id, submitted_jobs, shutdown_flag, wasm_loader, execution_notify, scheduler}
+    }
+
+    pub async fn set_scheduler(&self, scheduler: Arc<tokio::sync::Mutex<crate::scheduler::SchedulerEngine>>) {
+        *self.scheduler.lock().await = Some(scheduler);
     }
 
     pub async fn shutdown(&self) {
@@ -177,7 +183,7 @@ impl Worker{
     //     ()
     // }
     
-    pub async fn run_wasm_job_component(core_id: CoreId, task_id: String, component_name:String, func_name:String, payload:String, folder_to_mount:String, shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>)->task::JoinHandle<Result<Vec<Val>, anyhow::Error>>{
+    pub async fn run_wasm_job_component(core_id: CoreId, task_id: String, component_name:String, func_name:String, payload:String, folder_to_mount:String, shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>)->task::JoinHandle<(String, Result<Vec<Val>, anyhow::Error>)>{
         // Set up Wasmtime engine and module outside blocking
         // let component_name ="math_tasks".to_string();
         println!("Running component {:?}, func: {:?}", component_name, func_name);
@@ -205,7 +211,9 @@ impl Worker{
                 Err(e) => Self::store_result_uncompressed(&task_id, &format!("Error: {:?}", e)),
             }
             println!("Finished wasm task {}", task_id);
-            result
+            
+            // Return task_id along with result so we can notify scheduler
+            (task_id, result)
         });
         handler
     }
@@ -213,10 +221,22 @@ impl Worker{
     pub async fn  run_job(&self, task_id:String, binary_path: String, func_name:String, payload:String, folder_to_mount:String){
         let core_id: CoreId = self.core_id.clone(); // clone cause we need to pass by value a copy on each thread and it is bound to self
         let task_module_path = binary_path;
+        let scheduler_ref = self.scheduler.clone();
+        
         // Spawn a blocking task to map the worker to the core 
-        let handler = Self::run_wasm_job_component(core_id, task_id ,task_module_path, func_name, payload, folder_to_mount, self.wasm_loader.clone()).await;
-        // tokio::time::sleep(std::time::Duration::from_secs(20)).await; // for testing
-        ()
+        let handler = Self::run_wasm_job_component(core_id, task_id.clone() ,task_module_path, func_name, payload, folder_to_mount, self.wasm_loader.clone()).await;
+        
+        // Wait for task to complete and get the task_id back
+        // Note: handler.await returns Result<(String, Result<...>), JoinError>
+        let completed_task_id = match handler.await {
+            Ok((task_id_result, _result)) => task_id_result,
+            Err(_) => task_id.clone(), // If join failed, use original task_id
+        };
+        
+        // Notify scheduler that task is complete
+        if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
+            scheduler.lock().await.on_task_completed(completed_task_id).await;
+        }
     }
 
     pub async fn start(&self){
