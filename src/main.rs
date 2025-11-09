@@ -9,6 +9,7 @@ use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use core_affinity::{get_core_ids, CoreId};
 use tokio::signal;
 use std::sync::atomic::{AtomicBool, Ordering};
+use serde::Deserialize;
 
 use crate::scheduler::SchedulerEngine;
 use crate::various::{Job, SubmittedJobs, TaskQuery, WasmJobRequest};
@@ -67,11 +68,39 @@ async fn handle_submit_task(task: web::Json<WasmJobRequest>, submitted_tasks: we
     HttpResponse::Ok().body("Task submitted")
 }
 
+#[derive(Debug, Deserialize)]
+struct Config {
+    baseline: String,
+}
+
+fn load_baseline_from_config() -> String {
+    // Try to read from config.yaml
+    match std::fs::read_to_string("config.yaml") {
+        Ok(config_content) => {
+            match serde_yaml::from_str::<Config>(&config_content) {
+                Ok(config) => config.baseline,
+                Err(e) => {
+                    eprintln!("Warning: Failed to parse config.yaml: {}, defaulting to 'fifo'", e);
+                    "fifo".to_string()
+                }
+            }
+        }
+        Err(_) => {
+            eprintln!("Warning: config.yaml not found, defaulting to 'fifo'");
+            "fifo".to_string()
+        }
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     println!("Server started");
     let core_ids: Vec<CoreId> = get_core_ids().expect("Failed to get core IDs");
     println!("core_ids: {:?}", core_ids);
+
+    // Load baseline from config file
+    let baseline = load_baseline_from_config();
+    println!("Using baseline: {}", baseline);
 
     // Global shutdown flag
     static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
@@ -82,8 +111,9 @@ async fn main() -> std::io::Result<()> {
 
     // Wrapped arouns Arc so that we keep one instance in the Heap and when doing .clone we only clone pointers
     // Mutex is needed cause some instance fields are mutable across threads
+
     let scheduler = { 
-        let scheduler = Arc::new( Mutex::new(SchedulerEngine::new(core_ids, jobs_log.clone(), num_workers_to_start)));
+        let scheduler = Arc::new( Mutex::new(SchedulerEngine::new(core_ids, jobs_log.clone(), num_workers_to_start, baseline)));
         let scheduler_data: web::Data<Arc<Mutex<SchedulerEngine>>> = web::Data::new(scheduler.clone()); 
         scheduler_data
     };

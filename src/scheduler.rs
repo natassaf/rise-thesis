@@ -57,11 +57,12 @@
         task_status: Arc<Mutex<HashMap<String, u8>>>, // HashMap: task_id -> 0 (not processed) or 1 (processed)
         completed_count: Arc<Mutex<usize>>, // Counter for completed tasks
         execution_start_time: Arc<Mutex<Option<std::time::Instant>>>, // Track when execution starts
+        baseline: String, // Baseline scheduler type: "fifo" or "linux"
     }
 
     impl SchedulerEngine{
 
-        pub fn new(core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>,  num_workers_to_start: usize)->Self{
+        pub fn new(core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>,  num_workers_to_start: usize, baseline: String)->Self{
             
             // Create a notification mechanism to signal workers when to process tasks
             let execution_notify = Arc::new(Notify::new());
@@ -84,6 +85,7 @@
                 task_status: Arc::new(Mutex::new(HashMap::new())),
                 completed_count: Arc::new(Mutex::new(0)),
                 execution_start_time: Arc::new(Mutex::new(None)),
+                baseline,
             }
         }
 
@@ -93,15 +95,23 @@
                 worker.set_scheduler(scheduler_arc.clone()).await;
             }
             
+            // Capture baseline value before the closure
+            let baseline = self.baseline.clone();
+            
             let mut handlers:Vec<tokio::task::JoinHandle<()>> = vec![];
             // start all workers
             for worker in &self.workers {
                 let worker = worker.clone();
+                let baseline_clone = baseline.clone();
                 
                 // This blocks the thread and pins it to the core
                 let handler = task::spawn_blocking(move || {
-                    // Pin to the correct core
-                    core_affinity::set_for_current(worker.core_id);
+                    
+                    // Pin to the correct core (unless baseline is "linux")
+                    if baseline_clone != "linux" {
+                        println!("Pinning worker");
+                        core_affinity::set_for_current(worker.core_id);
+                    }
 
                     // Create a local runtime just for this thread
                     let rt = tokio::runtime::Builder::new_current_thread()

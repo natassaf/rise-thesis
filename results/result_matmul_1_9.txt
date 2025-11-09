@@ -1,0 +1,69 @@
+Result: Error: error while executing at wasm backtrace:
+    0:  0x13499 - matrix_multiplication_component.wasm!abort
+    1:   0xf1ec - matrix_multiplication_component.wasm!std::sys::pal::wasi::helpers::abort_internal::hcc3b2e0cde3c9001
+    2:   0xde65 - matrix_multiplication_component.wasm!std::process::abort::h0e38511b4c8b6f04
+    3:   0xde5b - matrix_multiplication_component.wasm!__rustc[5224e6b81cd82a8f]::__rust_abort
+    4:  0x1067b - matrix_multiplication_component.wasm!__rustc[5224e6b81cd82a8f]::__rust_start_panic
+    5:  0x104ec - matrix_multiplication_component.wasm!__rustc[5224e6b81cd82a8f]::rust_panic
+    6:  0x10471 - matrix_multiplication_component.wasm!std::panicking::rust_panic_with_hook::h085fb375cd657b2f
+    7:   0xf4db - matrix_multiplication_component.wasm!std::panicking::begin_panic_handler::{{closure}}::he68af7f9d5c53e56
+    8:   0xf447 - matrix_multiplication_component.wasm!std::sys::backtrace::__rust_end_short_backtrace::h4c38003a22ca226f
+    9:   0xfe58 - matrix_multiplication_component.wasm!__rustc[5224e6b81cd82a8f]::rust_begin_unwind
+   10:  0x1978b - matrix_multiplication_component.wasm!core::panicking::panic_fmt::h4e32e8d1cab5f47e
+   11:  0x14b34 - matrix_multiplication_component.wasm!core::panicking::panic_bounds_check::heafe84f8af6bbcb0
+   12:   0x46d0 - matrix_multiplication_component.wasm!run
+
+Caused by:
+    wasm trap: wasm `unreachable` instruction executed
+
+Stack backtrace:
+   0: std::backtrace_rs::backtrace::libunwind::trace
+             at /rustc/29483883eed69d5fb4db01964cdf2af4d86e9cb2/library/std/src/../../backtrace/src/backtrace/libunwind.rs:117:9
+   1: std::backtrace_rs::backtrace::trace_unsynchronized
+             at /rustc/29483883eed69d5fb4db01964cdf2af4d86e9cb2/library/std/src/../../backtrace/src/backtrace/mod.rs:66:14
+   2: std::backtrace::Backtrace::create
+             at /rustc/29483883eed69d5fb4db01964cdf2af4d86e9cb2/library/std/src/backtrace.rs:331:13
+   3: anyhow::error::<impl core::convert::From<E> for anyhow::Error>::from
+             at /Users/athanasiapharmake/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anyhow-1.0.98/src/backtrace.rs:27:14
+   4: <T as core::convert::Into<U>>::into
+             at /Users/athanasiapharmake/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/convert/mod.rs:768:9
+   5: wasmtime::runtime::trap::from_runtime_box
+             at /Users/athanasiapharmake/.cargo/git/checkouts/wasmtime-e8ef147765abf70d/4420d90/crates/wasmtime/src/runtime/trap.rs:101:39
+   6: wasmtime::runtime::func::invoke_wasm_and_catch_traps::{{closure}}
+             at /Users/athanasiapharmake/.cargo/git/checkouts/wasmtime-e8ef147765abf70d/4420d90/crates/wasmtime/src/runtime/func.rs:1497:28
+   7: core::result::Result<T,E>::map_err
+             at /Users/athanasiapharmake/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:914:27
+   8: wasmtime::runtime::func::invoke_wasm_and_catch_traps
+             at /Users/athanasiapharmake/.cargo/git/checkouts/wasmtime-e8ef147765abf70d/4420d90/crates/wasmtime/src/runtime/func.rs:1497:16
+   9: wasmtime::runtime::func::Func::call_unchecked_raw
+             at /Users/athanasiapharmake/.cargo/git/checkouts/wasmtime-e8ef147765abf70d/4420d90/crates/wasmtime/src/runtime/func.rs:1008:9
+  10: wasmtime::runtime::component::func::Func::call_raw
+             at /Users/athanasiapharmake/.cargo/git/checkouts/wasmtime-e8ef147765abf70d/4420d90/crates/wasmtime/src/runtime/component/func.rs:456:13
+  11: wasmtime::runtime::component::func::Func::call_impl
+             at /Users/athanasiapharmake/.cargo/git/checkouts/wasmtime-e8ef147765abf70d/4420d90/crates/wasmtime/src/runtime/component/func.rs:317:14
+  12: wasmtime::runtime::component::func::Func::call_async::{{closure}}::{{closure}}
+             at /Users/athanasiapharmake/.cargo/git/checkouts/wasmtime-e8ef147765abf70d/4420d90/crates/wasmtime/src/runtime/component/func.rs:287:36
+  13: wasmtime::runtime::store::async_::<impl wasmtime::runtime::store::context::StoreContextMut<T>>::on_fiber::{{closure}}::{{closure}}
+             at /Users/athanasiapharmake/.cargo/git/checkouts/wasmtime-e8ef147765abf70d/4420d90/crates/wasmtime/src/runtime/store/async_.rs:286:32
+  14: wasmtime::runtime::fiber::on_fiber::{{closure}}::{{closure}}
+             at /Users/athanasiapharmake/.cargo/git/checkouts/wasmtime-e8ef147765abf70d/4420d90/crates/wasmtime/src/runtime/fiber.rs:860:23
+  15: wasmtime::runtime::fiber::make_fiber::{{closure}}
+             at /Users/athanasiapharmake/.cargo/git/checkouts/wasmtime-e8ef147765abf70d/4420d90/crates/wasmtime/src/runtime/fiber.rs:829:9
+  16: <alloc::boxed::Box<F,A> as core::ops::function::FnOnce<Args>>::call_once
+             at /Users/athanasiapharmake/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1966:9
+  17: wasmtime_internal_fiber::Suspend<Resume,Yield,Return>::execute::{{closure}}
+             at /Users/athanasiapharmake/.cargo/git/checkouts/wasmtime-e8ef147765abf70d/4420d90/crates/fiber/src/lib.rs:270:66
+  18: <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once
+             at /Users/athanasiapharmake/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic/unwind_safe.rs:272:9
+  19: std::panicking::catch_unwind::do_call
+             at /Users/athanasiapharmake/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/panicking.rs:589:40
+  20: ___rust_try
+  21: std::panicking::catch_unwind
+             at /Users/athanasiapharmake/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/panicking.rs:552:19
+  22: std::panic::catch_unwind
+             at /Users/athanasiapharmake/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/panic.rs:359:14
+  23: wasmtime_internal_fiber::Suspend<Resume,Yield,Return>::execute
+             at /Users/athanasiapharmake/.cargo/git/checkouts/wasmtime-e8ef147765abf70d/4420d90/crates/fiber/src/lib.rs:270:26
+  24: wasmtime_internal_fiber::unix::fiber_start
+             at /Users/athanasiapharmake/.cargo/git/checkouts/wasmtime-e8ef147765abf70d/4420d90/crates/fiber/src/unix.rs:235:9
+  25: _wasmtime_fiber_start_35_0_0

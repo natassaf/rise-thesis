@@ -1,0 +1,3 @@
+# Scheduler configuration
+baseline: "fifo"  # Options: "fifo" or "linux"
+

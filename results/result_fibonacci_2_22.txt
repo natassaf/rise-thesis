@@ -1,0 +1,1 @@
+Result: [Record([("output", String("39088170.0"))])]
