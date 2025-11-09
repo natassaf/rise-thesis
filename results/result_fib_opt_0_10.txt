@@ -1,1 +1,0 @@
-Result: [Record([("output", String("3.0"))])]
