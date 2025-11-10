@@ -1,7 +1,10 @@
 mod various;
 mod scheduler;
 mod worker;
+mod scheduler_algorithms;
 mod wasm_loaders;
+mod memory_prediction;
+
 use std::{sync::Arc};
 use actix_web::web::Data;
 use tokio::sync::Mutex;

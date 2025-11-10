@@ -1,38 +1,12 @@
-    use std::sync::Arc;
-    use std::collections::HashMap;
-    use tokio::sync::{Mutex, Notify};
+use std::sync::Arc;
+use std::collections::HashMap;
+use tokio::sync::{Mutex, Notify};
 
-    use actix_web::web;
-    use tokio::{time::error::Error, task};
-    use crate::{various::{Job, SubmittedJobs}, worker::Worker};
-    use core_affinity::*;
+use actix_web::web;
+use tokio::{time::error::Error, task};
+use crate::{various::{Job, SubmittedJobs}, worker::Worker, scheduler_algorithms::{SchedulerAlgorithm, BaselineStaticSchedulerAlgorithm}};
+use core_affinity::*;
 
-    pub struct BaselineStaticSchedulerAlgorithm{
-    }
-
-    impl BaselineStaticSchedulerAlgorithm{
-        pub fn new()->Self{
-            Self{}
-        }
-        
-        pub async fn prioritize_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>) {
-            // Sort jobs by arrival time (oldest first) so workers process them in order
-            let job_ids_before: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
-            println!("Sorting jobs by arrival time before: {:?}", job_ids_before);
-
-            self.sort_by_arrival_time(submitted_jobs).await;
-
-            let job_ids_after: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
-            println!("Sorting jobs by arrival time after: {:?}", job_ids_after);
-        }
-
-        // Sort jobs by arrival time (oldest first)
-        async fn sort_by_arrival_time(&self, submitted_jobs: &web::Data<SubmittedJobs>) {
-            let mut jobs = submitted_jobs.jobs.lock().await;
-            jobs.sort_by(|a, b| a.arrival_time.cmp(&b.arrival_time));
-        }
-
-    }
 
     // Standalone function to store evaluation metrics to file
     fn store_evaluation_metrics(total_tasks: usize, total_time_secs: f64, total_time_ms: f64, avg_time_ms: f64, throughput: f64) {

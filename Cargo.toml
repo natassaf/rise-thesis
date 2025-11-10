@@ -14,12 +14,13 @@ async-trait = "0.1"
 wasmtime = { git = "https://github.com/natassaf/wasmtime.git", branch = "release-35-update-ort-version" }
 wasmtime-wasi = { git = "https://github.com/natassaf/wasmtime.git", package = "wasmtime-wasi", branch = "release-35-update-ort-version" }
 wasmtime-wasi-nn = { git = "https://github.com/natassaf/wasmtime.git", package = "wasmtime-wasi-nn", branch = "release-35-update-ort-version", features = ["onnx"] }
-wit-parser = "0.236"
+wit-parser = "0.240"
 serde_json = "1.0.142"
 serde = "1.0.219"
 serde_yaml = "0.9"
 flate2 = "1.0"
-base64 = "0.21"
+base64 = "0.22.1"
+regex = "1.11.3"
 
 [profile.release]
 lto = true

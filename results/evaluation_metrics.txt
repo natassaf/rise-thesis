@@ -1,4 +1,4 @@
-Total tasks processed: 75
-Total execution time: 39.36 seconds (39364.00 ms)
-Average time per task: 524.85 ms
-Throughput: 1.91 tasks/second
+Total tasks processed: 38
+Total execution time: 23.13 seconds (23133.00 ms)
+Average time per task: 608.76 ms
+Throughput: 1.64 tasks/second
