@@ -86,7 +86,7 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
         // for each job predict memory and time requirements
         let jobs = submitted_jobs.get_jobs().await;
         let job_ids_before: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
-        println!("Sorting jobs by arrival time before: {:?}", job_ids_before);
+        println!("Sorting jobs by memory before: {:?}", job_ids_before);
         
         let futures: Vec<_> = jobs.iter().map(|job| {
             let cwasm_file = job.binary_path.replace(".wasm", ".cwasm");
@@ -105,14 +105,14 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
                 let memory_prediction = predict_memory(&memory_features_vec).await;
                 
                 // Debug: Store memory_features and memory_prediction to results directory
-                save_debug_memory_prediction(&job_id, &memory_features, memory_prediction);
+                // save_debug_memory_prediction(&job_id, &memory_features, memory_prediction);
                 
                 (job_id, memory_prediction)
             }
         }).collect();
         
         let job_id_to_memory_prediction: HashMap<String, f64> = future::join_all(futures).await.into_iter().collect();
-        
+        println!("job_id_to_memory_prediction: {:?}", job_id_to_memory_prediction);
         // Update jobs with memory predictions and sort by memory prediction (larger to smaller)
         let mut jobs = submitted_jobs.jobs.lock().await;
         for job in jobs.iter_mut() {
@@ -128,8 +128,9 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
             // Sort in descending order (larger first)
             b_mem.partial_cmp(&a_mem).unwrap_or(std::cmp::Ordering::Equal)
         });
-        let job_ids_after: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
-        println!("Sorting jobs by arrival time after: {:?}", job_ids_after);
+        // Use the jobs we already have locked instead of calling get_jobs() again
+        let job_ids_after: Vec<_> = jobs.iter().map(|job| job.id.clone()).collect();
+        println!("Sorting jobs by memory time after: {:?}", job_ids_after);
     }
     
 }

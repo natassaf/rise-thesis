@@ -23,18 +23,18 @@ fn initialize_model() -> Result<()> {
 }
 
 pub async fn predict_memory(memory_features: &Vec<f32>) -> f64 {
-    println!("[DEBUG] predict_memory called with {} features", memory_features.len());
+    // println!("[DEBUG] predict_memory called with {} features", memory_features.len());
     
     let memory_features_scaler_path: &str = "src/memory_prediction/memory_model/scaler_x.json";
     let memory_target_scaler_path: &str = "src/memory_prediction/memory_model/scaler_y.json";
 
-    println!("[DEBUG] Loading scalers...");
+    // println!("[DEBUG] Loading scalers...");
     let memory_features_scaler = StandardScaler::new(memory_features_scaler_path);
     let memory_target_scaler = StandardScaler::new(memory_target_scaler_path);
 
-    println!("[DEBUG] Transforming features...");
+    // println!("[DEBUG] Transforming features...");
     let memory_features_normalized = memory_features_scaler.transform(memory_features);
-    println!("[DEBUG] Normalized features: {:?}", memory_features_normalized);
+    // println!("[DEBUG] Normalized features: {:?}", memory_features_normalized);
     
     // Initialize model if not already loaded
     if MODEL_SESSION.get().is_none() {
@@ -43,7 +43,7 @@ pub async fn predict_memory(memory_features: &Vec<f32>) -> f64 {
             eprintln!("[ERROR] Failed to initialize ONNX model: {:?}", e);
             return 0.0;
         }
-        println!("[DEBUG] Model initialized successfully");
+        // println!("[DEBUG] Model initialized successfully");
     } else {
         println!("[DEBUG] Model already initialized");
     }
@@ -51,7 +51,7 @@ pub async fn predict_memory(memory_features: &Vec<f32>) -> f64 {
     // Convert normalized features to ArrayD with shape (1, num_features) for batch inference
     // The features are already normalized, so we just need to reshape them
     let num_features = memory_features_normalized.len();
-    println!("[DEBUG] Creating input array with shape (1, {})", num_features);
+    // println!("[DEBUG] Creating input array with shape (1, {})", num_features);
     let input_array = match Array::from_shape_vec((1, num_features), memory_features_normalized) {
         Ok(arr) => arr,
         Err(e) => {
@@ -62,13 +62,13 @@ pub async fn predict_memory(memory_features: &Vec<f32>) -> f64 {
     
     // Convert to ArrayD for ONNX (dynamic dimensions)
     let input_array_dyn: ArrayD<f32> = input_array.into_dyn();
-    println!("[DEBUG] Input array shape: {:?}", input_array_dyn.shape());
+    // println!("[DEBUG] Input array shape: {:?}", input_array_dyn.shape());
     
     // Create a Value from the array
     println!("[DEBUG] Creating ONNX Value from array...");
     let input_value = match Value::from_array(input_array_dyn) {
         Ok(value) => {
-            println!("[DEBUG] Successfully created input value");
+            // println!("[DEBUG] Successfully created input value");
             value
         },
         Err(e) => {
@@ -79,11 +79,11 @@ pub async fn predict_memory(memory_features: &Vec<f32>) -> f64 {
     
     // Run inference using inputs! macro (similar to Python's sess.run(None, {input_name: X_test_normalized_float32}))
     // Do everything in a single lock scope to avoid multiple locks and potential deadlocks
-    println!("[DEBUG] Acquiring session lock...");
+    // println!("[DEBUG] Acquiring session lock...");
     let (output_shape, output_data) = {
         let mut session_guard = match MODEL_SESSION.get() {
             Some(s) => {
-                println!("[DEBUG] Locking session...");
+                // println!("[DEBUG] Locking session...");
                 s.lock().await
             },
             None => {
@@ -93,18 +93,18 @@ pub async fn predict_memory(memory_features: &Vec<f32>) -> f64 {
         };
         
         let session = &mut *session_guard;
-        println!("[DEBUG] Session locked successfully");
+        // println!("[DEBUG] Session locked successfully");
         
         // Get input and output names as owned strings to avoid borrow conflicts
         let input_name = session.inputs[0].name.clone();
         let output_name = session.outputs[0].name.clone();
-        println!("[DEBUG] Input name: {}, Output name: {}", input_name, output_name);
+        // println!("[DEBUG] Input name: {}, Output name: {}", input_name, output_name);
         
         // Run inference
         println!("[DEBUG] Running inference...");
         let outputs = match session.run(inputs![input_name.as_str() => input_value]) {
             Ok(outputs) => {
-                println!("[DEBUG] Inference successful");
+                // println!("[DEBUG] Inference successful");
                 outputs
             },
             Err(e) => {
@@ -115,10 +115,10 @@ pub async fn predict_memory(memory_features: &Vec<f32>) -> f64 {
         
         // Extract the output (y_predicted_normalized) - clone the data to own it
         // The output is typically a 2D array with shape (batch_size, 1)
-        println!("[DEBUG] Extracting output tensor...");
+        // println!("[DEBUG] Extracting output tensor...");
         match outputs[output_name.as_str()].try_extract_tensor::<f32>() {
             Ok((shape, data)) => {
-                println!("[DEBUG] Output shape: {:?}, data len: {}", shape, data.len());
+                // println!("[DEBUG] Output shape: {:?}, data len: {}", shape, data.len());
                 (shape.to_vec(), data.to_vec())
             },
             Err(e) => {
@@ -131,30 +131,30 @@ pub async fn predict_memory(memory_features: &Vec<f32>) -> f64 {
 
     // Extract the prediction value (normalized)
     // If output is (1, 1), get [0, 0]; if it's (1,), get [0]
-    println!("[DEBUG] Extracting prediction from output...");
+    // println!("[DEBUG] Extracting prediction from output...");
     let prediction_normalized = if output_shape.len() == 2 && output_shape[0] > 0 && output_shape[1] > 0 {
-        println!("[DEBUG] Output is 2D: shape {:?}, taking [0,0]", output_shape);
+        // println!("[DEBUG] Output is 2D: shape {:?}, taking [0,0]", output_shape);
         output_data[0]
     } else if output_shape.len() == 1 && output_shape[0] > 0 {
-        println!("[DEBUG] Output is 1D: shape {:?}, taking [0]", output_shape);
+        // println!("[DEBUG] Output is 1D: shape {:?}, taking [0]", output_shape);
         output_data[0]
     } else if !output_data.is_empty() {
-        println!("[DEBUG] Output data is not empty, taking first element");
+        // println!("[DEBUG] Output data is not empty, taking first element");
         output_data[0]
     } else {
         eprintln!("[ERROR] Unexpected output shape: {:?}, data len: {}", output_shape, output_data.len());
         return 0.0;
     };
     
-    println!("[DEBUG] Normalized prediction: {}", prediction_normalized);
+    // println!("[DEBUG] Normalized prediction: {}", prediction_normalized);
     
     // Denormalize the prediction using scaler_y.inverse_transform()
     // The scaler expects a slice, so we pass the normalized prediction as a single-element array
-    println!("[DEBUG] Denormalizing prediction...");
+    // println!("[DEBUG] Denormalizing prediction...");
     let prediction_normalized_vec = vec![prediction_normalized];
     let prediction_denormalized = memory_target_scaler.inverse_transform(&prediction_normalized_vec);
     
-    println!("[DEBUG] Denormalized prediction: {}", prediction_denormalized[0]);
+    // println!("[DEBUG] Denormalized prediction: {}", prediction_denormalized[0]);
     
     // Return the denormalized prediction
     prediction_denormalized[0] as f64
