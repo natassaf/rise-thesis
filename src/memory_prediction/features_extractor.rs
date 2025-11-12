@@ -5,9 +5,8 @@ use crate::memory_prediction::memory_prediction_utils::MemoryFeatures;
 
 
 fn process_line(line: &str, memory_features:&mut MemoryFeatures, memory_regex: &Regex, 
-                stack_regex: &Regex, i32_const_regex: &Regex, stack_pointer_found: &mut bool, 
-                prev_line_had_stack_pointer:&mut bool, table_regex: &Regex, data_size_regex: &Regex, 
-                local_regex: &Regex, stack_pointer_get_regex: &Regex, locals_data: &mut Vec<u32>) {
+                table_regex: &Regex, data_size_regex: &Regex, 
+                local_regex: &Regex, locals_data: &mut Vec<u32>) {
     // Linear memory
     if let Some(c) = memory_regex.captures(&line) {
         if let Ok(pages) = c[1].parse::<u32>() {
@@ -15,35 +14,7 @@ fn process_line(line: &str, memory_features:&mut MemoryFeatures, memory_regex: &
         }
     }
     
-    // Stack pointer - handle both single-line and cross-line matches
-    // Only match the FIRST occurrence to match old version behavior
-    // The old regex matches "stack_pointer\\s+i32.const" which in practice matches
-    // "global.get $__stack_pointer" on one line followed by "i32.const X" on the next line
-    if !*stack_pointer_found {
-        // First check if current line matches the pattern (single line)
-        if let Some(c) = stack_regex.captures(&line) {
-            if let Ok(v) = c[1].parse::<u64>() {
-                memory_features.stack_pointer_offset = v;
-                *stack_pointer_found = true; // Correctly dereference the boolean
-            }
-        }
-        // Check if previous line had "global.get $__stack_pointer" and current line has i32.const (cross-line match)
-        // This matches the actual pattern: "global.get $__stack_pointer" followed by "i32.const 6160"
-        else if *prev_line_had_stack_pointer {
-            if let Some(c) = i32_const_regex.captures(&line) {
-                if let Ok(v) = c[1].parse::<u64>() {
-                    memory_features.stack_pointer_offset = v;
-                    *stack_pointer_found = true; // Stop looking after first match
-                }
-            }
-        }
-    }
-    
-    // Check if current line has "global.get $__stack_pointer" for next iteration (only if we haven't found it yet)
-    // This is more specific than just "stack_pointer" to avoid false matches
-    if !*stack_pointer_found {
-        *prev_line_had_stack_pointer = stack_pointer_get_regex.is_match(&line);
-    }
+    // Function tables
     for cap in table_regex.captures_iter(&line) {
         if let Ok(size) = cap[1].parse::<u32>() {
             memory_features.total_function_references += size;
@@ -88,13 +59,6 @@ fn process_line(line: &str, memory_features:&mut MemoryFeatures, memory_regex: &
 fn extract_features_from_wat_batch<'a>(wat_file: &str, memory_features:&'a mut MemoryFeatures) -> &'a mut MemoryFeatures {
     // Compile regexes ONCE (outside the loop) - this is the key optimization!
     let memory_regex = Regex::new(r"\(memory\s+\(;\d+;\)\s+(\d+)\)").unwrap_or_else(|_| Regex::new("$").unwrap());
-    // Stack pointer regex: matches stack_pointer followed by whitespace and i32.const
-    // This can match across lines when reading full file, so we need to handle line-by-line differently
-    let stack_regex = Regex::new(r"stack_pointer\s+i32\.const\s+(\d+)").unwrap_or_else(|_| Regex::new("$").unwrap());
-    // Check for stack_pointer in context of "global.get" (the actual usage, not the definition)
-    // The old version matches: "global.get $__stack_pointer" followed by "i32.const 6160" on next line
-    let stack_pointer_get_regex = Regex::new(r"global\.get\s+\$__stack_pointer").unwrap_or_else(|_| Regex::new("$").unwrap());
-    let i32_const_regex = Regex::new(r"i32\.const\s+(\d+)").unwrap_or_else(|_| Regex::new("$").unwrap());
     let table_regex = Regex::new(r"\(table\s+\d+\s+(\d+)\s+funcref\)").unwrap_or_else(|_| Regex::new("$").unwrap());
     let data_size_regex = Regex::new(r"\(data[\s\S]*?\)").unwrap_or_else(|_| Regex::new("$").unwrap());
     let local_regex = Regex::new(r"\(local\s+([^)]*)\)").unwrap_or_else(|_| Regex::new("$").unwrap());
@@ -106,11 +70,6 @@ fn extract_features_from_wat_batch<'a>(wat_file: &str, memory_features:&'a mut M
     // Track locals for aggregate calculations
     let mut locals_data: Vec<u32> = Vec::new();
     
-    // Track if previous line had stack_pointer (for cross-line matching)
-    // Only match the FIRST occurrence to match old version behavior
-    let mut prev_line_had_stack_pointer = false;
-    let mut stack_pointer_found = false; // Track if we've already found the stack pointer offset
-    
     // Process each line one by one (reads line-by-line, not all at once)
     for line_result in reader.lines() {
         let line = line_result.unwrap_or_else(|_| String::new());
@@ -118,14 +77,9 @@ fn extract_features_from_wat_batch<'a>(wat_file: &str, memory_features:&'a mut M
             &line,
             memory_features,
             &memory_regex,
-            &stack_regex,
-            &i32_const_regex,
-            &mut stack_pointer_found,
-            &mut prev_line_had_stack_pointer,
             &table_regex,
             &data_size_regex,
             &local_regex,
-            &stack_pointer_get_regex,
             &mut locals_data,
         );
     }
@@ -137,6 +91,54 @@ fn extract_features_from_wat_batch<'a>(wat_file: &str, memory_features:&'a mut M
             memory_features.total_local_variables as f32 / locals_data.len() as f32;
     }
     
+    memory_features
+}
+
+
+pub async fn build_memory_features(
+    wasm_file: &str,
+    wat_file: &str,
+    payload: &str,
+    model_folder_name: &str,
+) -> MemoryFeatures {
+    let mut memory_features = MemoryFeatures::new();
+
+    // Binary size
+    memory_features.binary_size_bytes = fs::metadata(wasm_file).map(|m| m.len()).unwrap_or(0);
+
+    // Read WAT
+    extract_features_from_wat_batch(&wat_file, &mut memory_features);
+
+    // Request payload and model size
+    memory_features.request_payload_size = payload.len() as u64;
+    memory_features.model_file_size = compute_model_folder_size(model_folder_name);
+
+    // Parse payload: try to extract n from JSON, fallback to length
+    memory_features.payload= if let Ok(parsed_data) = serde_json::from_str::<serde_json::Value>(payload) {
+        println!("Parsed data: {:?}", parsed_data);
+        if let Some(n_value) = parsed_data.get("n") {
+            if let Some(n) = n_value.as_f64() {
+                println!("Using n value from JSON: {}", n);
+                n as i64
+            } else {
+                println!("n field exists but not a number, using payload length: {}", payload.len());
+                payload.len() as i64
+            }
+        } else {
+            println!("No n field in JSON, using payload length: {}", payload.len());
+            payload.len() as i64
+        }
+    } else {
+        println!("Failed to parse JSON, using payload length: {}", payload.len());
+        payload.len() as i64
+    };
+
+    // Extract binary name from the file path
+    let binary_name = wasm_file.split("/").last().unwrap();
+    println!("binary name new{:?}", binary_name);
+    memory_features.binary_name = binary_name.to_string();
+    
+
     memory_features
 }
 
@@ -180,14 +182,11 @@ mod tests {
             avg_local_variables_per_function: 0.0,
             high_complexity_functions: 0,
             linear_memory_bytes: 0,
-            stack_pointer_offset: 0,
             total_function_references: 0,
             is_ml_workload: false,
             request_payload_size: 0,
             model_file_size: 0,
-            memory_kb: -1,
             payload: 0,
-            task_duration: 0.0,
         }
     }
 
@@ -237,14 +236,6 @@ mod tests {
             features_new.linear_memory_bytes, 
             1114112,
             "linear_memory_bytes should match"
-        );
-        
-        println!("features_new.stack_pointer_offset: {:?}", features_new.stack_pointer_offset);
-
-        assert_eq!(
-            features_new.stack_pointer_offset,
-            128,
-            "stack_pointer_offset should match"
         );
         
         println!("features_new.total_function_references: {:?}", features_new.total_function_references);
@@ -343,4 +334,205 @@ mod tests {
             "is_ml_workload should match"
         );
     }
-     }
+
+    #[tokio::test]
+    async fn test_build_memory_features_old_vs_new_test_case_1() {
+        use std::path::Path;
+        
+        let (wat_file, wasm_file) = get_test_case_2();
+        let payload = r#"{"n": 10}"#;
+        let model_folder_name = "";
+
+        // Check if files exist
+        assert!(
+            Path::new(&wat_file).exists(),
+            "Test file {} does not exist",
+            wat_file
+        );
+        assert!(
+            Path::new(&wasm_file).exists(),
+            "Test file {} does not exist",
+            wasm_file
+        );
+        
+        println!("\n=== Testing {} ===", wat_file);
+        
+        // Build features using new method
+        let features_new = build_memory_features(
+            &wasm_file,
+            &wat_file,
+            payload,
+            model_folder_name
+        ).await;
+        
+        println!("binary name new{:?}", features_new.binary_name);
+        
+        // Hardcoded old values (from build_memory_features_old output)
+        let features_old = MemoryFeatures {
+            binary_name: "matrix_multiplication_component.wasm".to_string(),
+            binary_size_bytes: 195353,
+            linear_memory_bytes: 1114112,
+            total_function_references: 0,
+            import_count: 53,
+            export_count: 102,
+            function_count: 585,
+            global_variable_count: 4,
+            type_definition_count: 694,
+            instance_count: 23,
+            resource_count: 0,
+            data_section_size_bytes: 38,
+            total_local_variables: 1171,
+            max_local_variables_per_function: 33,
+            avg_local_variables_per_function: 4.418868,
+            high_complexity_functions: 21,
+            is_ml_workload: false,
+            request_payload_size: 9,
+            model_file_size: 0,
+            payload: 10,
+        };
+        
+        // Compare all fields
+        println!("Comparing binary_name...");
+        assert_eq!(
+            features_new.binary_name,
+            features_old.binary_name,
+            "binary_name should match"
+        );
+        
+        println!("Comparing binary_size_bytes...");
+        assert_eq!(
+            features_new.binary_size_bytes,
+            features_old.binary_size_bytes,
+            "binary_size_bytes should match"
+        );
+        
+        println!("Comparing linear_memory_bytes...");
+        assert_eq!(
+            features_new.linear_memory_bytes,
+            features_old.linear_memory_bytes,
+            "linear_memory_bytes should match"
+        );
+        
+        println!("Comparing total_function_references...");
+        assert_eq!(
+            features_new.total_function_references,
+            features_old.total_function_references,
+            "total_function_references should match"
+        );
+        
+        println!("Comparing import_count...");
+        assert_eq!(
+            features_new.import_count,
+            features_old.import_count,
+            "import_count should match"
+        );
+        
+        println!("Comparing export_count...");
+        assert_eq!(
+            features_new.export_count,
+            features_old.export_count,
+            "export_count should match"
+        );
+        
+        println!("Comparing function_count...");
+        assert_eq!(
+            features_new.function_count,
+            features_old.function_count,
+            "function_count should match"
+        );
+        
+        println!("Comparing global_variable_count...");
+        assert_eq!(
+            features_new.global_variable_count,
+            features_old.global_variable_count,
+            "global_variable_count should match"
+        );
+        
+        println!("Comparing type_definition_count...");
+        assert_eq!(
+            features_new.type_definition_count,
+            features_old.type_definition_count,
+            "type_definition_count should match"
+        );
+        
+        println!("Comparing instance_count...");
+        assert_eq!(
+            features_new.instance_count,
+            features_old.instance_count,
+            "instance_count should match"
+        );
+        
+        println!("Comparing resource_count...");
+        assert_eq!(
+            features_new.resource_count,
+            features_old.resource_count,
+            "resource_count should match"
+        );
+        
+        println!("Comparing data_section_size_bytes...");
+        assert_eq!(
+            features_new.data_section_size_bytes,
+            features_old.data_section_size_bytes,
+            "data_section_size_bytes should match"
+        );
+        
+        println!("Comparing total_local_variables...");
+        assert_eq!(
+            features_new.total_local_variables,
+            features_old.total_local_variables,
+            "total_local_variables should match"
+        );
+        
+        println!("Comparing max_local_variables_per_function...");
+        assert_eq!(
+            features_new.max_local_variables_per_function,
+            features_old.max_local_variables_per_function,
+            "max_local_variables_per_function should match"
+        );
+        
+        println!("Comparing high_complexity_functions...");
+        assert_eq!(
+            features_new.high_complexity_functions,
+            features_old.high_complexity_functions,
+            "high_complexity_functions should match"
+        );
+        
+        println!("Comparing avg_local_variables_per_function...");
+        let avg_diff = (features_new.avg_local_variables_per_function - features_old.avg_local_variables_per_function).abs();
+        assert!(
+            avg_diff < 0.001,
+            "avg_local_variables_per_function should match (diff: {})",
+            avg_diff
+        );
+        
+        println!("Comparing is_ml_workload...");
+        assert_eq!(
+            features_new.is_ml_workload,
+            features_old.is_ml_workload,
+            "is_ml_workload should match"
+        );
+        
+        println!("Comparing request_payload_size...");
+        assert_eq!(
+            features_new.request_payload_size,
+            features_old.request_payload_size,
+            "request_payload_size should match"
+        );
+        
+        println!("Comparing model_file_size...");
+        assert_eq!(
+            features_new.model_file_size,
+            features_old.model_file_size,
+            "model_file_size should match"
+        );
+        
+        println!("Comparing payload...");
+        assert_eq!(
+            features_new.payload,
+            features_old.payload,
+            "payload should match"
+        );
+        
+        println!("✓ All fields match for test_case_1!");
+    }
+}

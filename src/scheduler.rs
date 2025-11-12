@@ -4,7 +4,7 @@ use tokio::sync::{Mutex, Notify};
 
 use actix_web::web;
 use tokio::{time::error::Error, task};
-use crate::{various::{Job, SubmittedJobs}, worker::Worker, scheduler_algorithms::{SchedulerAlgorithm, BaselineStaticSchedulerAlgorithm}};
+use crate::{scheduler_algorithms::{BaselineStaticSchedulerAlgorithm, MemoryTimeAwareSchedulerAlgorithm, SchedulerAlgorithm}, various::{Job, SubmittedJobs}, worker::Worker};
 use core_affinity::*;
 
 
@@ -26,7 +26,7 @@ use core_affinity::*;
     pub struct SchedulerEngine{
         submitted_jobs: web::Data<SubmittedJobs>,
         workers: Vec<Arc<Worker>>,
-        scheduler_algo: BaselineStaticSchedulerAlgorithm,
+        scheduler_algo: MemoryTimeAwareSchedulerAlgorithm,
         execution_notify: Arc<Notify>, // Signal to workers to start processing
         task_status: Arc<Mutex<HashMap<String, u8>>>, // HashMap: task_id -> 0 (not processed) or 1 (processed)
         completed_count: Arc<Mutex<usize>>, // Counter for completed tasks
@@ -36,7 +36,7 @@ use core_affinity::*;
 
     impl SchedulerEngine{
 
-        pub fn new(core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>,  num_workers_to_start: usize, baseline: String)->Self{
+        pub fn new(scheduler_algo: MemoryTimeAwareSchedulerAlgorithm, core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>,  num_workers_to_start: usize, baseline: String)->Self{
             
             // Create a notification mechanism to signal workers when to process tasks
             let execution_notify = Arc::new(Notify::new());
@@ -50,7 +50,6 @@ use core_affinity::*;
                 Arc::new(Worker::new(core_id.id, *core_id, shared_wasm_loader.clone(), submitted_jobs.clone(), execution_notify.clone()))
             }).collect();
             
-            let scheduler_algo = BaselineStaticSchedulerAlgorithm::new();
             SchedulerEngine{
                 submitted_jobs, 
                 workers, 

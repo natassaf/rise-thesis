@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::Deserialize;
 
 use crate::scheduler::SchedulerEngine;
+use crate::scheduler_algorithms::{BaselineStaticSchedulerAlgorithm, MemoryTimeAwareSchedulerAlgorithm, SchedulerAlgorithm};
 use crate::various::{Job, SubmittedJobs, TaskQuery, WasmJobRequest};
 
 async fn handle_kill(app_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>>)->impl Responder{
@@ -112,11 +113,12 @@ async fn main() -> std::io::Result<()> {
     // Wrapped in web::Data so that we configure them as shared resources across HTTPServer threads 
     let jobs_log: web::Data<SubmittedJobs> = web::Data::new(SubmittedJobs::new());
 
+
     // Wrapped arouns Arc so that we keep one instance in the Heap and when doing .clone we only clone pointers
     // Mutex is needed cause some instance fields are mutable across threads
-
+    let scheduler_algo = MemoryTimeAwareSchedulerAlgorithm::new();
     let scheduler = { 
-        let scheduler = Arc::new( Mutex::new(SchedulerEngine::new(core_ids, jobs_log.clone(), num_workers_to_start, baseline)));
+        let scheduler = Arc::new( Mutex::new(SchedulerEngine::new(scheduler_algo, core_ids, jobs_log.clone(), num_workers_to_start, baseline)));
         let scheduler_data: web::Data<Arc<Mutex<SchedulerEngine>>> = web::Data::new(scheduler.clone()); 
         scheduler_data
     };

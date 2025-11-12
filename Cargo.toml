@@ -21,6 +21,8 @@ serde_yaml = "0.9"
 flate2 = "1.0"
 base64 = "0.22.1"
 regex = "1.11.3"
+ort = { version = "2.0.0-rc.10" }
+ndarray = "0.16"
 
 [profile.release]
 lto = true

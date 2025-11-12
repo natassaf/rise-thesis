@@ -93,6 +93,8 @@ pub struct Job{
     pub folder_to_mount: String,
     pub status: String,
     pub arrival_time: std::time::SystemTime, // Track when job was submitted for sorting
+    pub memory_prediction: Option<f64>,
+    pub execution_time_prediction: Option<f64>,
 }
 
 impl From<WasmJobRequest> for Job {
@@ -111,6 +113,8 @@ impl From<WasmJobRequest> for Job {
             folder_to_mount: "models/".to_string() + &request.model_folder_name,
             status:"waiting".to_string(),
             arrival_time: std::time::SystemTime::now(), // Record arrival time for sorting
+            memory_prediction: None,
+            execution_time_prediction: None,
         }
     }
 }
