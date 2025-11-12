@@ -1,9 +1,8 @@
 mod various;
 mod scheduler;
 mod worker;
-mod scheduler_algorithms;
+mod optimized_scheduling_preprocessing;
 mod wasm_loaders;
-mod memory_prediction;
 
 use std::{sync::Arc};
 use actix_web::web::Data;
@@ -15,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::Deserialize;
 
 use crate::scheduler::SchedulerEngine;
-use crate::scheduler_algorithms::{BaselineStaticSchedulerAlgorithm, MemoryTimeAwareSchedulerAlgorithm, SchedulerAlgorithm};
+use crate::optimized_scheduling_preprocessing::scheduler_algorithms::{BaselineStaticSchedulerAlgorithm, MemoryTimeAwareSchedulerAlgorithm, SchedulerAlgorithm};
 use crate::various::{Job, SubmittedJobs, TaskQuery, WasmJobRequest};
 
 async fn handle_kill(app_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>>)->impl Responder{

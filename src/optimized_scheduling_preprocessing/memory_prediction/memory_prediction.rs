@@ -1,4 +1,4 @@
-use crate::memory_prediction::standard_scaler::StandardScaler;
+use crate::optimized_scheduling_preprocessing::memory_prediction::standard_scaler::StandardScaler;
 use ort::{session::Session, inputs, value::Value};
 use ndarray::{Array, ArrayD};
 use std::sync::OnceLock;
@@ -12,7 +12,7 @@ static MODEL_SESSION: OnceLock<Arc<Mutex<Session>>> = OnceLock::new();
 
 /// Initialize and load the ONNX model
 fn initialize_model() -> Result<()> {
-    let model_path = "src/memory_prediction/memory_model/memory_model.onnx";
+    let model_path = "src/optimized_scheduling_preprocessing/memory_prediction/memory_model/memory_model.onnx";
     let session = Session::builder()?
         .commit_from_file(model_path)?;
     
@@ -25,8 +25,8 @@ fn initialize_model() -> Result<()> {
 pub async fn predict_memory(memory_features: &Vec<f32>) -> f64 {
     // println!("[DEBUG] predict_memory called with {} features", memory_features.len());
     
-    let memory_features_scaler_path: &str = "src/memory_prediction/memory_model/scaler_x.json";
-    let memory_target_scaler_path: &str = "src/memory_prediction/memory_model/scaler_y.json";
+    let memory_features_scaler_path: &str = "src/optimized_scheduling_preprocessing/memory_prediction/memory_model/scaler_x.json";
+    let memory_target_scaler_path: &str = "src/optimized_scheduling_preprocessing/memory_prediction/memory_model/scaler_y.json";
 
     // println!("[DEBUG] Loading scalers...");
     let memory_features_scaler = StandardScaler::new(memory_features_scaler_path);

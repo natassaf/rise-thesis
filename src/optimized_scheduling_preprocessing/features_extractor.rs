@@ -1,7 +1,7 @@
 use regex::Regex;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
-use crate::memory_prediction::memory_prediction_utils::MemoryFeatures;
+use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction_utils::MemoryFeatures;
 
 
 fn process_line(line: &str, memory_features:&mut MemoryFeatures, memory_regex: &Regex, 

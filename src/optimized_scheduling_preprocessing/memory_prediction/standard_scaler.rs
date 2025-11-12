@@ -43,7 +43,7 @@ mod tests{
     #[test]
     fn test_scaler_transform_and_inverse_transform() -> Result<(), Box<dyn std::error::Error>> {
         // Load the scaler parameters from JSON
-        let json_str = fs::read_to_string("src/memory_prediction/memory_model/scaler_x.json")?;
+        let json_str = fs::read_to_string("src/optimized_scheduling_preprocessing/memory_prediction/memory_model/scaler_x.json")?;
         let scaler: StandardScaler = serde_json::from_str(&json_str)?;
     
         println!("Loaded Scaler: {:?}", scaler);
