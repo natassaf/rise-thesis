@@ -5,13 +5,15 @@ use crate::optimized_scheduling_preprocessing::execution_time_prediction::time_p
 use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction_utils::MemoryFeatures;
 
 
-fn process_line(line: &str, memory_features:&mut MemoryFeatures, memory_regex: &Regex, 
-                table_regex: &Regex, data_size_regex: &Regex, 
+fn process_line(line: &str, memory_features:&mut MemoryFeatures, time_features: &mut ExecutionTimeFeatures, 
+                memory_regex: &Regex, table_regex: &Regex, data_size_regex: &Regex, 
                 local_regex: &Regex, locals_data: &mut Vec<u32>) {
     // Linear memory
     if let Some(c) = memory_regex.captures(&line) {
         if let Ok(pages) = c[1].parse::<u32>() {
-            memory_features.linear_memory_bytes += pages as u64 * 64 * 1024;
+            let memory_bytes = pages as u64 * 64 * 1024;
+            memory_features.linear_memory_bytes += memory_bytes;
+            time_features.linear_memory_bytes += memory_bytes;
         }
     }
     
@@ -23,17 +25,31 @@ fn process_line(line: &str, memory_features:&mut MemoryFeatures, memory_regex: &
     }
     
     // Counts (simple string matching - fast)
-    memory_features.import_count += line.matches("(import ").count() as u32;
-    memory_features.export_count += line.matches("(export ").count() as u32;
-    memory_features.function_count += line.matches("(func ").count() as u32;
-    memory_features.global_variable_count += line.matches("(global ").count() as u32;
-    memory_features.type_definition_count += line.matches("(type ").count() as u32;
-    memory_features.instance_count += line.matches("(instance ").count() as u32;
-    memory_features.resource_count += line.matches("(resource ").count() as u32;
+    let import_count = line.matches("(import ").count() as u32;
+    let export_count = line.matches("(export ").count() as u32;
+    let function_count = line.matches("(func ").count() as u32;
+    let global_variable_count = line.matches("(global ").count() as u32;
+    let type_definition_count = line.matches("(type ").count() as u32;
+    let instance_count = line.matches("(instance ").count() as u32;
+    let resource_count = line.matches("(resource ").count() as u32;
+    
+    memory_features.import_count += import_count;
+    memory_features.export_count += export_count;
+    memory_features.function_count += function_count;
+    memory_features.global_variable_count += global_variable_count;
+    memory_features.type_definition_count += type_definition_count;
+    memory_features.instance_count += instance_count;
+    memory_features.resource_count += resource_count;
+    
+    time_features.function_count += function_count;
+    time_features.instance_count += instance_count;
+    time_features.resource_count += resource_count;
     
     // Data section size
     for m in data_size_regex.find_iter(&line) {
-        memory_features.data_section_size_bytes += (m.end() - m.start()) as u64;
+        let size = (m.end() - m.start()) as u64;
+        memory_features.data_section_size_bytes += size;
+        time_features.data_section_size_bytes += size;
     }
     
     // Local variables - collect data for aggregate calculation
@@ -44,6 +60,7 @@ fn process_line(line: &str, memory_features:&mut MemoryFeatures, memory_regex: &
         locals_data.push(count);
         if count > 10 {
             memory_features.high_complexity_functions += 1;
+            time_features.high_complexity_functions += 1;
         }
     }
     
@@ -53,11 +70,12 @@ fn process_line(line: &str, memory_features:&mut MemoryFeatures, memory_regex: &
         .iter()
         .any(|k| lower.contains(k)) {
         memory_features.is_ml_workload = true;
+        time_features.is_ml_workload = true;
     }
 
 }
 
-fn extract_features_from_wat_batch<'a>(wat_file: &str, memory_features:&'a mut MemoryFeatures) -> &'a mut MemoryFeatures {
+fn extract_features_from_wat_batch<'a>(wat_file: &str, memory_features:&'a mut MemoryFeatures, time_features: &'a mut ExecutionTimeFeatures) -> (&'a mut MemoryFeatures, &'a mut ExecutionTimeFeatures) {
     // Compile regexes ONCE (outside the loop) - this is the key optimization!
     let memory_regex = Regex::new(r"\(memory\s+\(;\d+;\)\s+(\d+)\)").unwrap_or_else(|_| Regex::new("$").unwrap());
     let table_regex = Regex::new(r"\(table\s+\d+\s+(\d+)\s+funcref\)").unwrap_or_else(|_| Regex::new("$").unwrap());
@@ -77,6 +95,7 @@ fn extract_features_from_wat_batch<'a>(wat_file: &str, memory_features:&'a mut M
         process_line(
             &line,
             memory_features,
+            time_features,
             &memory_regex,
             &table_regex,
             &data_size_regex,
@@ -92,9 +111,35 @@ fn extract_features_from_wat_batch<'a>(wat_file: &str, memory_features:&'a mut M
             memory_features.total_local_variables as f32 / locals_data.len() as f32;
     }
     
-    memory_features
+    (memory_features, time_features)
 }
 
+pub async fn build_execution_time_features(
+    wasm_file: &str,
+    wat_file: &str,
+    payload: &str,
+    model_folder_name: &str,
+) -> ExecutionTimeFeatures {
+    let mut time_features = ExecutionTimeFeatures::new();
+
+    // Binary size
+    time_features.binary_size_bytes = fs::metadata(wasm_file).map(|m| m.len()).unwrap_or(0);
+
+    // Read WAT using existing extract_features_from_wat_batch
+    // Create a temporary MemoryFeatures to extract all features, and populate time_features at the same time
+    let mut memory_features = MemoryFeatures::new();
+    extract_features_from_wat_batch(&wat_file, &mut memory_features, &mut time_features);
+
+    // Request payload and model size
+    time_features.request_payload_size = payload.len() as u64;
+    time_features.model_file_size = compute_model_folder_size(model_folder_name);
+
+    // Extract binary name from the file path
+    let binary_name = wasm_file.split("/").last().unwrap();
+    time_features.binary_name = binary_name.to_string();
+
+    time_features
+}
 
 pub async fn build_memory_features(
     wasm_file: &str,
@@ -108,7 +153,9 @@ pub async fn build_memory_features(
     memory_features.binary_size_bytes = fs::metadata(wasm_file).map(|m| m.len()).unwrap_or(0);
 
     // Read WAT
-    extract_features_from_wat_batch(&wat_file, &mut memory_features);
+    // Create a temporary ExecutionTimeFeatures (not used, but required by the function)
+    let mut time_features = ExecutionTimeFeatures::new();
+    extract_features_from_wat_batch(&wat_file, &mut memory_features, &mut time_features);
 
     // Request payload and model size
     memory_features.request_payload_size = payload.len() as u64;
@@ -229,7 +276,9 @@ mod tests {
         
         // Test extract_features_from_wat (line-by-line processing)
         let mut features_new = create_default_memory_features();
-        extract_features_from_wat_batch(&wat_file, &mut features_new);
+        // Create a temporary ExecutionTimeFeatures for the test
+        let mut time_features_test = ExecutionTimeFeatures::new();
+        extract_features_from_wat_batch(&wat_file, &mut features_new, &mut time_features_test);
         
         println!("features_new.linear_memory_bytes: {:?}", features_new.linear_memory_bytes);
         assert_eq!(

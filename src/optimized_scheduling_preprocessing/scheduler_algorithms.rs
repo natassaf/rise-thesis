@@ -8,6 +8,8 @@ use crate::various::SubmittedJobs;
 use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction::predict_memory;
 use crate::optimized_scheduling_preprocessing::features_extractor::build_memory_features;
 use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction_utils::MemoryFeatures;
+use crate::optimized_scheduling_preprocessing::execution_time_prediction::time_prediction::predict_time;
+use crate::optimized_scheduling_preprocessing::features_extractor::build_execution_time_features;
 
 /// Save debug information about memory features and prediction to a file
 fn save_debug_memory_prediction(job_id: &str, memory_features: &MemoryFeatures, memory_prediction: f64) {
@@ -76,12 +78,29 @@ impl SchedulerAlgorithm for BaselineStaticSchedulerAlgorithm{
 pub struct MemoryTimeAwareSchedulerAlgorithm{
 }
 
+impl MemoryTimeAwareSchedulerAlgorithm{
+
+    async fn predict_memory(&self, cwasm_file: &str, wat_file: &str, payload: &str, folder_to_mount: &str)->f64{
+        let memory_features = build_memory_features(&cwasm_file, &wat_file, &payload, &folder_to_mount).await;
+        let memory_features_vec = memory_features.to_vec();
+        let memory_prediction = predict_memory(&memory_features_vec).await;
+        return memory_prediction
+    }
+    async fn predict_time(&self, cwasm_file: &str, wat_file: &str, payload: &str, folder_to_mount: &str)->f64{
+        let time_features = build_execution_time_features(&cwasm_file, &wat_file, &payload, &folder_to_mount).await;
+        let time_features_vec = time_features.to_vec();
+        let time_prediction = predict_time(&time_features_vec).await;
+        return time_prediction
+    }
+
+}
 
 #[async_trait]
 impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
     fn new()->Self{
         Self{}
     }
+
     async fn prioritize_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>) {
         // for each job predict memory and time requirements
         let jobs = submitted_jobs.get_jobs().await;
@@ -100,10 +119,8 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
             // 2. We need to take ownership of the cloned values (cwasm_file, wat_file, etc.)
             // 3. The future will be awaited later, so we can't borrow from the outer scope
             async move {
-                let memory_features = build_memory_features(&cwasm_file, &wat_file, &payload, &folder_to_mount).await;
-                let memory_features_vec = memory_features.to_vec();
-                let memory_prediction = predict_memory(&memory_features_vec).await;
-                
+                let memory_prediction = self.predict_memory(&cwasm_file, &wat_file, &payload, &folder_to_mount).await;
+                let time_prediction = self.predict_time(&cwasm_file, &wat_file, &payload, &folder_to_mount).await;
                 // Debug: Store memory_features and memory_prediction to results directory
                 // save_debug_memory_prediction(&job_id, &memory_features, memory_prediction);
                 
