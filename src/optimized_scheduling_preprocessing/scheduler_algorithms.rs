@@ -105,7 +105,7 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
         // for each job predict memory and time requirements
         let jobs = submitted_jobs.get_jobs().await;
         let job_ids_before: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
-        println!("Sorting jobs by memory before: {:?}", job_ids_before);
+        println!("Sorting jobs by execution time and memory before: {:?}", job_ids_before);
         
         let futures: Vec<_> = jobs.iter().map(|job| {
             let cwasm_file = job.binary_path.replace(".wasm", ".cwasm");
@@ -124,30 +124,57 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
                 // Debug: Store memory_features and memory_prediction to results directory
                 // save_debug_memory_prediction(&job_id, &memory_features, memory_prediction);
                 
-                (job_id, memory_prediction)
+                (job_id, memory_prediction, time_prediction)
             }
         }).collect();
         
-        let job_id_to_memory_prediction: HashMap<String, f64> = future::join_all(futures).await.into_iter().collect();
+        let predictions: Vec<(String, f64, f64)> = future::join_all(futures).await;
+        let mut job_id_to_memory_prediction: HashMap<String, f64> = HashMap::new();
+        let mut job_id_to_time_prediction: HashMap<String, f64> = HashMap::new();
+        
+        for (job_id, memory_pred, time_pred) in predictions {
+            job_id_to_memory_prediction.insert(job_id.clone(), memory_pred);
+            job_id_to_time_prediction.insert(job_id, time_pred);
+        }
+        
         println!("job_id_to_memory_prediction: {:?}", job_id_to_memory_prediction);
-        // Update jobs with memory predictions and sort by memory prediction (larger to smaller)
+        println!("job_id_to_time_prediction: {:?}", job_id_to_time_prediction);
+        
+        // Update jobs with memory and time predictions
         let mut jobs = submitted_jobs.jobs.lock().await;
         for job in jobs.iter_mut() {
             if let Some(prediction) = job_id_to_memory_prediction.get(&job.id) {
                 job.memory_prediction = Some(*prediction);
             }
+            if let Some(prediction) = job_id_to_time_prediction.get(&job.id) {
+                job.execution_time_prediction = Some(*prediction);
+            }
         }
         
-        // Sort jobs by memory prediction from larger to smaller
+        // Sort jobs:
+        // 1. First by execution time from largest to shortest (descending)
+        // 2. Then by memory prediction from shortest to largest (ascending)
+        // This way, when we pop() from the end, we get the job with shortest time and largest memory
         jobs.sort_by(|a, b| {
+            let a_time = a.execution_time_prediction.unwrap_or(0.0);
+            let b_time = b.execution_time_prediction.unwrap_or(0.0);
             let a_mem = a.memory_prediction.unwrap_or(0.0);
             let b_mem = b.memory_prediction.unwrap_or(0.0);
-            // Sort in descending order (larger first)
-            b_mem.partial_cmp(&a_mem).unwrap_or(std::cmp::Ordering::Equal)
+            
+            // First sort by execution time: descending (largest first, shortest last)
+            match b_time.partial_cmp(&a_time) {
+                Some(std::cmp::Ordering::Equal) => {
+                    // If execution times are equal, sort by memory: ascending (smallest first, largest last)
+                    a_mem.partial_cmp(&b_mem).unwrap_or(std::cmp::Ordering::Equal)
+                }
+                Some(ordering) => ordering,
+                None => std::cmp::Ordering::Equal,
+            }
         });
+        
         // Use the jobs we already have locked instead of calling get_jobs() again
         let job_ids_after: Vec<_> = jobs.iter().map(|job| job.id.clone()).collect();
-        println!("Sorting jobs by memory time after: {:?}", job_ids_after);
+        println!("Sorting jobs by execution time (desc) and memory (asc) after: {:?}", job_ids_after);
     }
     
 }
