@@ -1,6 +1,7 @@
 use regex::Regex;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
+use crate::optimized_scheduling_preprocessing::execution_time_prediction::time_prediction_utils::ExecutionTimeFeatures;
 use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction_utils::MemoryFeatures;
 
 
@@ -142,8 +143,7 @@ pub async fn build_memory_features(
     memory_features
 }
 
-
-fn compute_model_folder_size(model_folder_name: &str) -> u64 {
+pub fn compute_model_folder_size(model_folder_name: &str) -> u64 {
     if model_folder_name.is_empty() { return 0; }
     let base = if cfg!(target_os = "linux") {
         "/home/pi/memory-estimator/models/"
@@ -535,4 +535,4 @@ mod tests {
         
         println!("✓ All fields match for test_case_1!");
     }
-}
+    }
