@@ -74,6 +74,11 @@ pub struct TaskQuery {
 // }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExecuteTasksRequest{
+    pub scheduling_algorithm: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WasmJobRequest{
     binary_name: String,
     func_name: String,

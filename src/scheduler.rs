@@ -26,17 +26,16 @@ use core_affinity::*;
     pub struct SchedulerEngine{
         submitted_jobs: web::Data<SubmittedJobs>,
         workers: Vec<Arc<Worker>>,
-        scheduler_algo: MemoryTimeAwareSchedulerAlgorithm,
         execution_notify: Arc<Notify>, // Signal to workers to start processing
         task_status: Arc<Mutex<HashMap<String, u8>>>, // HashMap: task_id -> 0 (not processed) or 1 (processed)
         completed_count: Arc<Mutex<usize>>, // Counter for completed tasks
         execution_start_time: Arc<Mutex<Option<std::time::Instant>>>, // Track when execution starts
-        baseline: String, // Baseline scheduler type: "fifo" or "linux"
+        pin_cores: bool,
     }
 
     impl SchedulerEngine{
 
-        pub fn new(scheduler_algo: MemoryTimeAwareSchedulerAlgorithm, core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>,  num_workers_to_start: usize, baseline: String)->Self{
+        pub fn new(core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>,  num_workers_to_start: usize, pin_cores: bool)->Self{
             
             // Create a notification mechanism to signal workers when to process tasks
             let execution_notify = Arc::new(Notify::new());
@@ -53,12 +52,11 @@ use core_affinity::*;
             SchedulerEngine{
                 submitted_jobs, 
                 workers, 
-                scheduler_algo, 
                 execution_notify,
                 task_status: Arc::new(Mutex::new(HashMap::new())),
                 completed_count: Arc::new(Mutex::new(0)),
                 execution_start_time: Arc::new(Mutex::new(None)),
-                baseline,
+                pin_cores,
             }
         }
 
@@ -69,20 +67,19 @@ use core_affinity::*;
             }
             
             // Capture baseline value before the closure
-            let baseline = self.baseline.clone();
+            let pin_cores = self.pin_cores.clone();
             
             let mut handlers:Vec<tokio::task::JoinHandle<()>> = vec![];
             // start all workers
             for worker in &self.workers {
                 let worker = worker.clone();
-                let baseline_clone = baseline.clone();
+                let pin_cores_clone = pin_cores.clone();
                 
                 // This blocks the thread and pins it to the core
                 let handler = task::spawn_blocking(move || {
                     
                     // Pin to the correct core (unless baseline is "linux")
-                    if baseline_clone != "linux" {
-                        println!("Pinning worker");
+                    if pin_cores_clone{
                         core_affinity::set_for_current(worker.core_id);
                     }
 
@@ -113,8 +110,14 @@ use core_affinity::*;
             drop(task_status);
 
         }
-        pub async fn execute_jobs(&mut self){
-            
+        pub async fn execute_jobs(&mut self, scheduling_algorithm: String){
+            // Create the appropriate scheduler algorithm based on the request
+            let scheduler_algo: Box<dyn SchedulerAlgorithm> = match scheduling_algorithm.as_str() {
+                "memory_time_aware" => Box::new(MemoryTimeAwareSchedulerAlgorithm::new()),
+                "baseline" => Box::new(BaselineStaticSchedulerAlgorithm::new()),
+                _ => panic!("Invalid scheduling algorithm: {}. Must be 'memory_time_aware' or 'baseline'", scheduling_algorithm),
+            };
+        
             // Record start time
             let start_time = std::time::Instant::now();
             *self.execution_start_time.lock().await = Some(start_time);
@@ -127,10 +130,10 @@ use core_affinity::*;
             // Initialize completed counter
             *self.completed_count.lock().await = 0;
             
-            println!("=== Execution started at {:?} with {} tasks ===", start_time, jobs.len());
+            println!("=== Execution started at {:?} with {} tasks using {} algorithm ===", start_time, jobs.len(), scheduling_algorithm);
             
-            // Schedule tasks: sort by arrival time
-            self.scheduler_algo.prioritize_tasks(&self.submitted_jobs).await;
+            // Schedule tasks using the selected algorithm
+            scheduler_algo.prioritize_tasks(&self.submitted_jobs).await;
             // Notify all workers to start processing tasks
             self.execution_notify.notify_waiters();
         }
@@ -211,14 +214,14 @@ use core_affinity::*;
 
 
 
-        pub async fn execute_jobs_continuously(&mut self)->Result<(), Error>{
-            loop {
-                println!("Checking for new tasks");
-                println!("Num of submitted tasks: {:?}", self.submitted_jobs.get_num_tasks().await);
-                self.scheduler_algo.prioritize_tasks(&self.submitted_jobs).await;
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-        }
+        // pub async fn execute_jobs_continuously(&mut self)->Result<(), Error>{
+        //     loop {
+        //         println!("Checking for new tasks");
+        //         println!("Num of submitted tasks: {:?}", self.submitted_jobs.get_num_tasks().await);
+        //         self.scheduler_algo.prioritize_tasks(&self.submitted_jobs).await;
+        //         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        //     }
+        // }
 
     }
 

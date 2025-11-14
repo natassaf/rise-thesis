@@ -1,3 +1,4 @@
 # Scheduler configuration
-baseline: "fifo"  # Options: "fifo" or "linux"
+pin_cores: true
+num_workers: 2
 

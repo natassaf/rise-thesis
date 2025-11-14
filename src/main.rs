@@ -14,8 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::Deserialize;
 
 use crate::scheduler::SchedulerEngine;
-use crate::optimized_scheduling_preprocessing::scheduler_algorithms::{BaselineStaticSchedulerAlgorithm, MemoryTimeAwareSchedulerAlgorithm, SchedulerAlgorithm};
-use crate::various::{Job, SubmittedJobs, TaskQuery, WasmJobRequest};
+use crate::various::{Job, SubmittedJobs, TaskQuery, WasmJobRequest, ExecuteTasksRequest};
 
 async fn handle_kill(app_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>>)->impl Responder{
     for h in app_data.lock().await.iter(){
@@ -24,9 +23,10 @@ async fn handle_kill(app_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<(
     HttpResponse::Ok().body(format!("Workers killed"))
 }
 
-async fn handle_execute_tasks(app_data: web::Data<Arc<Mutex<SchedulerEngine>>>)->impl Responder{
+async fn handle_execute_tasks(task: web::Json<ExecuteTasksRequest>, app_data: web::Data<Arc<Mutex<SchedulerEngine>>>)->impl Responder{
     let mut scheduler = app_data.lock().await;
-    scheduler.execute_jobs().await;
+    let scheduling_algorithm  = task.into_inner().scheduling_algorithm;
+    scheduler.execute_jobs(scheduling_algorithm).await;
     HttpResponse::Ok().body(format!("Executing tasks"))
 }
 
@@ -73,24 +73,33 @@ async fn handle_submit_task(task: web::Json<WasmJobRequest>, submitted_tasks: we
 
 #[derive(Debug, Deserialize)]
 struct Config {
-    baseline: String,
+    pin_cores: bool,
+    num_workers: usize
 }
 
-fn load_baseline_from_config() -> String {
+
+
+fn load_config() -> Config {
     // Try to read from config.yaml
     match std::fs::read_to_string("config.yaml") {
         Ok(config_content) => {
             match serde_yaml::from_str::<Config>(&config_content) {
-                Ok(config) => config.baseline,
+                Ok(config) => config,
                 Err(e) => {
-                    eprintln!("Warning: Failed to parse config.yaml: {}, defaulting to 'fifo'", e);
-                    "fifo".to_string()
+                    eprintln!("Warning: Failed to parse config.yaml: {}, using defaults", e);
+                    Config {
+                        pin_cores: false,
+                        num_workers: 2,
+                    }
                 }
             }
         }
         Err(_) => {
-            eprintln!("Warning: config.yaml not found, defaulting to 'fifo'");
-            "fifo".to_string()
+            eprintln!("Warning: config.yaml not found, using defaults");
+            Config {
+                pin_cores: false,
+                num_workers: 2,
+            }
         }
     }
 }
@@ -101,13 +110,15 @@ async fn main() -> std::io::Result<()> {
     let core_ids: Vec<CoreId> = get_core_ids().expect("Failed to get core IDs");
     println!("core_ids: {:?}", core_ids);
 
-    // Load baseline from config file
-    let baseline = load_baseline_from_config();
-    println!("Using baseline: {}", baseline);
+    // Load config from config.yaml file
+    let config = load_config();
+    let pin_cores = config.pin_cores;
+    let num_workers_to_start = config.num_workers;
+    println!("pin_cores: {}, num_workers: {}", pin_cores, num_workers_to_start);
 
     // Global shutdown flag
     static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
-    let num_workers_to_start = 2;
+    
     // Initialize scheduler object and job logger 
     // Wrapped in web::Data so that we configure them as shared resources across HTTPServer threads 
     let jobs_log: web::Data<SubmittedJobs> = web::Data::new(SubmittedJobs::new());
@@ -115,9 +126,8 @@ async fn main() -> std::io::Result<()> {
 
     // Wrapped arouns Arc so that we keep one instance in the Heap and when doing .clone we only clone pointers
     // Mutex is needed cause some instance fields are mutable across threads
-    let scheduler_algo = MemoryTimeAwareSchedulerAlgorithm::new();
     let scheduler = { 
-        let scheduler = Arc::new( Mutex::new(SchedulerEngine::new(scheduler_algo, core_ids, jobs_log.clone(), num_workers_to_start, baseline)));
+        let scheduler = Arc::new( Mutex::new(SchedulerEngine::new(core_ids, jobs_log.clone(), num_workers_to_start, pin_cores)));
         let scheduler_data: web::Data<Arc<Mutex<SchedulerEngine>>> = web::Data::new(scheduler.clone()); 
         scheduler_data
     };
@@ -162,7 +172,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(handlers_data.clone());
         app = app.route("/submit_task", web::post().to(handle_submit_task));
         app = app.route("/get_result", web::get().to(handle_get_result));
-        app = app.route("/run_tasks", web::get().to(handle_execute_tasks));
+        app = app.route("/run_tasks", web::post().to(handle_execute_tasks));
         app = app.route("/kill", web::get().to(handle_kill));
         app
     })

@@ -35,7 +35,6 @@ fn save_debug_memory_prediction(job_id: &str, memory_features: &MemoryFeatures, 
 
 #[async_trait]
 pub trait SchedulerAlgorithm{
-    fn new()->Self;
     async fn prioritize_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>);
 }
 
@@ -45,8 +44,7 @@ pub struct BaselineStaticSchedulerAlgorithm{
 }
 
 impl BaselineStaticSchedulerAlgorithm{
-
-    pub fn new()->Self{
+    pub fn new() -> Self {
         Self{}
     }
 
@@ -59,10 +57,6 @@ impl BaselineStaticSchedulerAlgorithm{
 
 #[async_trait]
 impl SchedulerAlgorithm for BaselineStaticSchedulerAlgorithm{
-    fn new()->Self{
-        Self{}
-    }
-
     async fn prioritize_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>) {
         // Sort jobs by arrival time (oldest first) so workers process them in order
         let job_ids_before: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
@@ -79,6 +73,9 @@ pub struct MemoryTimeAwareSchedulerAlgorithm{
 }
 
 impl MemoryTimeAwareSchedulerAlgorithm{
+    pub fn new() -> Self {
+        Self{}
+    }
 
     async fn predict_memory(&self, cwasm_file: &str, wat_file: &str, payload: &str, folder_to_mount: &str)->f64{
         let memory_features = build_memory_features(&cwasm_file, &wat_file, &payload, &folder_to_mount).await;
@@ -92,15 +89,10 @@ impl MemoryTimeAwareSchedulerAlgorithm{
         let time_prediction = predict_time(&time_features_vec).await;
         return time_prediction
     }
-
 }
 
 #[async_trait]
 impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
-    fn new()->Self{
-        Self{}
-    }
-
     async fn prioritize_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>) {
         // for each job predict memory and time requirements
         let jobs = submitted_jobs.get_jobs().await;
