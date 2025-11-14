@@ -23,10 +23,16 @@ async fn handle_kill(app_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<(
     HttpResponse::Ok().body(format!("Workers killed"))
 }
 
-async fn handle_execute_tasks(task: web::Json<ExecuteTasksRequest>, app_data: web::Data<Arc<Mutex<SchedulerEngine>>>)->impl Responder{
+async fn handle_predict_and_sort(task: web::Json<ExecuteTasksRequest>, app_data: web::Data<Arc<Mutex<SchedulerEngine>>>)->impl Responder{
     let mut scheduler = app_data.lock().await;
-    let scheduling_algorithm  = task.into_inner().scheduling_algorithm;
-    scheduler.execute_jobs(scheduling_algorithm).await;
+    let scheduling_algorithm = task.into_inner().scheduling_algorithm;
+    scheduler.predict_and_sort(scheduling_algorithm).await;
+    HttpResponse::Ok().body(format!("Predictions and sorting completed"))
+}
+
+async fn handle_execute_tasks(app_data: web::Data<Arc<Mutex<SchedulerEngine>>>)->impl Responder{
+    let mut scheduler = app_data.lock().await;
+    scheduler.execute_jobs().await;
     HttpResponse::Ok().body(format!("Executing tasks"))
 }
 
@@ -172,6 +178,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(handlers_data.clone());
         app = app.route("/submit_task", web::post().to(handle_submit_task));
         app = app.route("/get_result", web::get().to(handle_get_result));
+        app = app.route("/predict_and_sort", web::post().to(handle_predict_and_sort));
         app = app.route("/run_tasks", web::post().to(handle_execute_tasks));
         app = app.route("/kill", web::get().to(handle_kill));
         app

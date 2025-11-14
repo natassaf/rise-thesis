@@ -8,8 +8,8 @@ To run this code on Rasberry
 4) Run:
     cargo build --release --target aarch64-unknown-linux-gnu
     aarch64-unknown-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/rise-thesis
-    scp target/aarch64-unknown-linux-gnu/release/rise-thesis pi@192.168.0.234:workspace
-    scp -r wasm-modules/ pi@192.168.0.234:workspace/ 
+    scp target/aarch64-unknown-linux-gnu/release/rise-thesis pi@pi@192.168.8.110:workspace
+    scp -r wasm-modules/ pi@192.168.8.110:workspace/ 
 
 
 
@@ -36,8 +36,8 @@ scp -r . pi@192.168.8.110:/home/pi/rise-thesis
 # Update system
 sudo apt update && sudo apt upgrade -y
 
-# Install basic development tools
-sudo apt install -y build-essential pkg-config libssl-dev git curl
+# Install basic development tools (including OpenSSL development libraries)
+sudo apt install -y build-essential pkg-config libssl-dev libssl3 git curl
 
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y

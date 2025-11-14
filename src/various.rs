@@ -158,7 +158,7 @@ impl SubmittedJobs{
         if jobs.is_empty() {
             None
         } else {
-            Some(jobs.remove(0))
+            Some(jobs.pop().unwrap())
         }
     }
 

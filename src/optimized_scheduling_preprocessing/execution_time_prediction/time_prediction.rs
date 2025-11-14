@@ -38,7 +38,7 @@ pub async fn predict_time(time_features: &Vec<f32>) -> f64 {
     
     // Initialize model if not already loaded
     if MODEL_SESSION.get().is_none() {
-        println!("[DEBUG] Initializing model...");
+        // println!("[DEBUG] Initializing model...");
         if let Err(e) = initialize_model() {
             eprintln!("[ERROR] Failed to initialize ONNX model: {:?}", e);
             return 0.0;
@@ -65,7 +65,7 @@ pub async fn predict_time(time_features: &Vec<f32>) -> f64 {
     // println!("[DEBUG] Input array shape: {:?}", input_array_dyn.shape());
     
     // Create a Value from the array
-    println!("[DEBUG] Creating ONNX Value from array...");
+    // println!("[DEBUG] Creating ONNX Value from array...");
     let input_value = match Value::from_array(input_array_dyn) {
         Ok(value) => {
             // println!("[DEBUG] Successfully created input value");
@@ -101,7 +101,7 @@ pub async fn predict_time(time_features: &Vec<f32>) -> f64 {
         // println!("[DEBUG] Input name: {}, Output name: {}", input_name, output_name);
         
         // Run inference
-        println!("[DEBUG] Running inference...");
+        // println!("[DEBUG] Running inference...");
         let outputs = match session.run(inputs![input_name.as_str() => input_value]) {
             Ok(outputs) => {
                 // println!("[DEBUG] Inference successful");

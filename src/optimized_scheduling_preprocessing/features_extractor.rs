@@ -163,7 +163,7 @@ pub async fn build_memory_features(
 
     // Parse payload: try to extract n from JSON, fallback to length
     memory_features.payload= if let Ok(parsed_data) = serde_json::from_str::<serde_json::Value>(payload) {
-        println!("Parsed data: {:?}", parsed_data);
+        // println!("Parsed data: {:?}", parsed_data);
         if let Some(n_value) = parsed_data.get("n") {
             if let Some(n) = n_value.as_f64() {
                 println!("Using n value from JSON: {}", n);
@@ -177,7 +177,7 @@ pub async fn build_memory_features(
             payload.len() as i64
         }
     } else {
-        println!("Failed to parse JSON, using payload length: {}", payload.len());
+        // println!("Failed to parse JSON, using payload length: {}", payload.len());
         payload.len() as i64
     };
 

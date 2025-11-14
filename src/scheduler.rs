@@ -110,14 +110,23 @@ use core_affinity::*;
             drop(task_status);
 
         }
-        pub async fn execute_jobs(&mut self, scheduling_algorithm: String){
+        pub async fn predict_and_sort(&mut self, scheduling_algorithm: String){
             // Create the appropriate scheduler algorithm based on the request
             let scheduler_algo: Box<dyn SchedulerAlgorithm> = match scheduling_algorithm.as_str() {
                 "memory_time_aware" => Box::new(MemoryTimeAwareSchedulerAlgorithm::new()),
                 "baseline" => Box::new(BaselineStaticSchedulerAlgorithm::new()),
                 _ => panic!("Invalid scheduling algorithm: {}. Must be 'memory_time_aware' or 'baseline'", scheduling_algorithm),
             };
-        
+            
+            println!("=== Starting predictions and sorting with {} algorithm ===", scheduling_algorithm);
+            
+            // Schedule tasks using the selected algorithm (does predictions and sorting)
+            scheduler_algo.prioritize_tasks(&self.submitted_jobs).await;
+            
+            println!("=== Predictions and sorting completed ===");
+        }
+
+        pub async fn execute_jobs(&mut self){
             // Record start time
             let start_time = std::time::Instant::now();
             *self.execution_start_time.lock().await = Some(start_time);
@@ -130,11 +139,9 @@ use core_affinity::*;
             // Initialize completed counter
             *self.completed_count.lock().await = 0;
             
-            println!("=== Execution started at {:?} with {} tasks using {} algorithm ===", start_time, jobs.len(), scheduling_algorithm);
+            println!("=== Execution started at {:?} with {} tasks ===", start_time, jobs.len());
             
-            // Schedule tasks using the selected algorithm
-            scheduler_algo.prioritize_tasks(&self.submitted_jobs).await;
-            // Notify all workers to start processing tasks
+            // Notify all workers to start processing tasks (no sorting/predictions here)
             self.execution_notify.notify_waiters();
         }
 
