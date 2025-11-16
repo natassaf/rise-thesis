@@ -4,7 +4,7 @@ use actix_web::web;
 use async_trait::async_trait;
 use futures::future;
 
-use crate::various::SubmittedJobs;
+use crate::api::api_objects::SubmittedJobs;
 use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction::predict_memory;
 use crate::optimized_scheduling_preprocessing::features_extractor::build_memory_features;
 use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction_utils::MemoryFeatures;

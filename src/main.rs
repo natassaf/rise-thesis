@@ -1,88 +1,28 @@
-mod various;
+mod utils;
 mod scheduler;
 mod worker;
 mod optimized_scheduling_preprocessing;
 mod wasm_loaders;
-
+mod api;
 use std::{sync::Arc};
 use actix_web::web::Data;
 use tokio::sync::Mutex;
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{web, App, HttpServer};
 use core_affinity::{get_core_ids, CoreId};
 use tokio::signal;
 use std::sync::atomic::{AtomicBool, Ordering};
 use serde::Deserialize;
 
 use crate::scheduler::SchedulerEngine;
-use crate::various::{Job, SubmittedJobs, TaskQuery, WasmJobRequest, ExecuteTasksRequest};
+use crate::api::api_objects::{SubmittedJobs};
+use crate::api::api_handlers::{handle_submit_task, handle_get_result, handle_predict_and_sort, handle_execute_tasks, handle_kill};
 
-async fn handle_kill(app_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>>)->impl Responder{
-    for h in app_data.lock().await.iter(){
-        h.abort();
-    }
-    HttpResponse::Ok().body(format!("Workers killed"))
-}
-
-async fn handle_predict_and_sort(task: web::Json<ExecuteTasksRequest>, app_data: web::Data<Arc<Mutex<SchedulerEngine>>>)->impl Responder{
-    let mut scheduler = app_data.lock().await;
-    let scheduling_algorithm = task.into_inner().scheduling_algorithm;
-    scheduler.predict_and_sort(scheduling_algorithm).await;
-    HttpResponse::Ok().body(format!("Predictions and sorting completed"))
-}
-
-async fn handle_execute_tasks(app_data: web::Data<Arc<Mutex<SchedulerEngine>>>)->impl Responder{
-    let mut scheduler = app_data.lock().await;
-    scheduler.execute_jobs().await;
-    HttpResponse::Ok().body(format!("Executing tasks"))
-}
-
-async fn handle_get_result(query: web::Query<TaskQuery>) -> impl Responder {
-    println!("Running get result for task {}", query.id);
-    
-    // Return compressed result
-    let compressed_path = format!("results/result_{}.gz", query.id);
-    let uncompressed_path = format!("results/result_{}.txt", query.id);
-    
-    // Try compressed file first
-    match std::fs::read(&compressed_path) {
-        Ok(compressed_data) => {
-            HttpResponse::Ok()
-                .append_header(("Content-Type", "application/gzip"))
-                .append_header(("Content-Encoding", "gzip"))
-                .append_header(("Content-Disposition", format!("attachment; filename=\"result_{}.gz\"", query.id)))
-                .body(compressed_data)
-        },
-        Err(_) => {
-            // Fallback to uncompressed file
-            match std::fs::read(&uncompressed_path) {
-                Ok(uncompressed_data) => {
-                    HttpResponse::Ok()
-                        .append_header(("Content-Type", "text/plain"))
-                        .append_header(("Content-Disposition", format!("attachment; filename=\"result_{}.txt\"", query.id)))
-                        .body(uncompressed_data)
-                },
-                Err(_) => {
-                    HttpResponse::NotFound().body("Result not found")
-                }
-            }
-        }
-    }
-}
-
-async fn handle_submit_task(task: web::Json<WasmJobRequest>, submitted_tasks: web::Data<SubmittedJobs>)->impl Responder {
-    // Reads the json request and adds the job to the job logger. Returns response immediatelly to client
-    let job: Job = task.into_inner().into();
-    submitted_tasks.add_task(job).await;
-    println!("Number of tasks waiting: {:?}", submitted_tasks.get_num_tasks().await);
-    HttpResponse::Ok().body("Task submitted")
-}
 
 #[derive(Debug, Deserialize)]
 struct Config {
     pin_cores: bool,
     num_workers: usize
 }
-
 
 
 fn load_config() -> Config {

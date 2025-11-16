@@ -3,7 +3,8 @@ use std::sync::Arc;
 use core_affinity::{CoreId};
 use serde_json::json;
 use tokio::{sync::{Mutex, Notify}, task};
-use crate::{scheduler::SchedulerEngine, various::Job};
+use crate::{api::api_objects::SubmittedJobs, scheduler::SchedulerEngine};
+use crate::api::api_objects::Job;
 use crate::wasm_loaders::WasmComponentLoader;
 use wasmtime::component::Val;
 use flate2::write::GzEncoder;
@@ -30,7 +31,7 @@ fn decompress_payload(compressed_base64: &str) -> Result<String, Box<dyn std::er
 pub struct Worker{
     worker_id:usize,
     pub core_id:CoreId,
-    submitted_jobs: actix_web::web::Data<crate::various::SubmittedJobs>, // Reference to submitted jobs
+    submitted_jobs: actix_web::web::Data<SubmittedJobs>, // Reference to submitted jobs
     shutdown_flag: Arc<Mutex<bool>>,
     wasm_loader: Arc<Mutex<WasmComponentLoader>>,
     execution_notify: Arc<Notify>, // Wait for signal to start processing
@@ -70,7 +71,7 @@ fn create_wasm_event_val_for_matrix() -> wasmtime::component::Val {
 }
 
 impl Worker{
-    pub fn new(worker_id:usize, core_id:CoreId, wasm_loader: Arc<Mutex<WasmComponentLoader>>, submitted_jobs: actix_web::web::Data<crate::various::SubmittedJobs>, execution_notify: Arc<Notify>)->Self{
+    pub fn new(worker_id:usize, core_id:CoreId, wasm_loader: Arc<Mutex<WasmComponentLoader>>, submitted_jobs: actix_web::web::Data<SubmittedJobs>, execution_notify: Arc<Notify>)->Self{
         let shutdown_flag = Arc::new(Mutex::new(false));
         let scheduler = Arc::new(Mutex::new(None));
         Worker{worker_id, core_id, submitted_jobs, shutdown_flag, wasm_loader, execution_notify, scheduler}
@@ -265,7 +266,9 @@ impl Worker{
                 match my_task{
                     None=> {
                         // No more tasks available, wait for next execution signal
-                        break;
+                        if self.submitted_jobs.get_num_tasks().await == 0 {
+                            break;
+                        }
                     },
                     Some(my_task_1)=>{
                         let task_id = my_task_1.id.clone();

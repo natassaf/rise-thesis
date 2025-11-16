@@ -4,8 +4,9 @@ use tokio::sync::{Mutex, Notify};
 
 use actix_web::web;
 use tokio::{time::error::Error, task};
-use crate::{optimized_scheduling_preprocessing::scheduler_algorithms::{BaselineStaticSchedulerAlgorithm, MemoryTimeAwareSchedulerAlgorithm, SchedulerAlgorithm}, various::{Job, SubmittedJobs}, worker::Worker};
+use crate::{optimized_scheduling_preprocessing::scheduler_algorithms::{BaselineStaticSchedulerAlgorithm, MemoryTimeAwareSchedulerAlgorithm, SchedulerAlgorithm},worker::Worker};
 use core_affinity::*;
+use crate::api::api_objects::{SubmittedJobs, Job};
 
 
     // Standalone function to store evaluation metrics to file

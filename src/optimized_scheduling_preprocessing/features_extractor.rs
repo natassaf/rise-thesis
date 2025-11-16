@@ -82,8 +82,14 @@ fn extract_features_from_wat_batch<'a>(wat_file: &str, memory_features:&'a mut M
     let data_size_regex = Regex::new(r"\(data[\s\S]*?\)").unwrap_or_else(|_| Regex::new("$").unwrap());
     let local_regex = Regex::new(r"\(local\s+([^)]*)\)").unwrap_or_else(|_| Regex::new("$").unwrap());
     
-    // Open file
-    let file = File::open(wat_file).unwrap();
+    // Open file - handle missing file gracefully
+    let file = match File::open(wat_file) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("[WARNING] Failed to open WAT file {}: {}. Skipping WAT feature extraction.", wat_file, e);
+            return (memory_features, time_features);
+        }
+    };
     let reader = BufReader::new(file);
     
     // Track locals for aggregate calculations
@@ -166,14 +172,11 @@ pub async fn build_memory_features(
         // println!("Parsed data: {:?}", parsed_data);
         if let Some(n_value) = parsed_data.get("n") {
             if let Some(n) = n_value.as_f64() {
-                println!("Using n value from JSON: {}", n);
                 n as i64
             } else {
-                println!("n field exists but not a number, using payload length: {}", payload.len());
                 payload.len() as i64
             }
         } else {
-            println!("No n field in JSON, using payload length: {}", payload.len());
             payload.len() as i64
         }
     } else {
@@ -183,7 +186,6 @@ pub async fn build_memory_features(
 
     // Extract binary name from the file path
     let binary_name = wasm_file.split("/").last().unwrap();
-    println!("binary name new{:?}", binary_name);
     memory_features.binary_name = binary_name.to_string();
     
 
@@ -413,8 +415,6 @@ mod tests {
             payload,
             model_folder_name
         ).await;
-        
-        println!("binary name new{:?}", features_new.binary_name);
         
         // Hardcoded old values (from build_memory_features_old output)
         let features_old = MemoryFeatures {

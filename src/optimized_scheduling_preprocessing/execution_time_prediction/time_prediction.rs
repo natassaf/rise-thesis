@@ -45,7 +45,7 @@ pub async fn predict_time(time_features: &Vec<f32>) -> f64 {
         }
         // println!("[DEBUG] Model initialized successfully");
     } else {
-        println!("[DEBUG] Model already initialized");
+        // println!("[DEBUG] Model already initialized");
     }
     
     // Convert normalized features to ArrayD with shape (1, num_features) for batch inference
