@@ -19,37 +19,9 @@ Three more repositories were used to create this project:
 4. **rise-scheduler-models** - Creation and training of models that predict memory and execution time requirements of given tasks.
 5. **wasm-memory-calculation** - Used to gather data to train the memory-prediction and execution time models. In this repo, for each request, memory and time are measured and stored by running each task sequentially on a separate process initialized for each request and getting the peak memory used by this process.
 
-## Running the System
+## Running the App
 
-### On Any OS
-
-```bash
-cargo build --release
-./target/release/rise-thesis
-```
-
-### On rise-scheduler-experiments
-
-1. Create Python virtual environment and install requirements:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
-
-2. Activate environment (if not already activated)
-
-3. Navigate to src directory:
-   ```bash
-   cd src
-   ```
-
-4. Run the main script:
-   ```bash
-   python main.py
-   ```
-
-### On Raspberry Pi 5 with Ubuntu
+### To run this repo  on  Raspberry Pi 5 with Ubuntu
 
 Cross compilation didn't work on macOS due to the `ort` dependency that fails. Until this dependency issue is solved, the way to run it is:
 
@@ -103,3 +75,24 @@ Cross compilation didn't work on macOS due to the `ort` dependency that fails. U
    ./target/release/memory-estimator
    ```
 
+
+### On  the repo rise-scheduler-experiments
+
+1. Create Python virtual environment and install requirements:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
+
+2. Activate environment (if not already activated)
+
+3. Navigate to src directory:
+   ```bash
+   cd src
+   ```
+
+4. Run the main script:
+   ```bash
+   python main.py
+   ```
