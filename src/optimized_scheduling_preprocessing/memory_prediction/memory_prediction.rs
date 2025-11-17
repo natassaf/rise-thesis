@@ -154,7 +154,7 @@ pub async fn predict_memory(memory_features: &Vec<f32>) -> f64 {
     let prediction_normalized_vec = vec![prediction_normalized];
     let prediction_denormalized = memory_target_scaler.inverse_transform(&prediction_normalized_vec);
     
-    // println!("[DEBUG] Denormalized prediction: {}", prediction_denormalized[0]);
+    println!("[DEBUG] Denormalized prediction: {}", prediction_denormalized[0]);
     
     // Return the denormalized prediction
     prediction_denormalized[0] as f64

@@ -11,6 +11,21 @@ use crate::optimized_scheduling_preprocessing::memory_prediction::memory_predict
 use crate::optimized_scheduling_preprocessing::execution_time_prediction::time_prediction::predict_time;
 use crate::optimized_scheduling_preprocessing::features_extractor::build_execution_time_features;
 
+/// Check how many jobs have changed index after sorting
+fn count_jobs_with_changed_index(job_ids_before: &[String], job_ids_after: &[String]) -> usize {
+    let mut changed_count = 0;
+    
+    for (index, job_id) in job_ids_after.iter().enumerate() {
+        if let Some(original_index) = job_ids_before.iter().position(|id| id == job_id) {
+            if original_index != index {
+                changed_count += 1;
+            }
+        }
+    }
+    
+    changed_count
+}
+
 /// Save debug information about memory features and prediction to a file
 fn save_debug_memory_prediction(job_id: &str, memory_features: &MemoryFeatures, memory_prediction: f64) {
     let debug_filename = format!("results/debug_memory_prediction_{}.txt", job_id);
@@ -97,7 +112,7 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
         // for each job predict memory and time requirements
         let jobs = submitted_jobs.get_jobs().await;
         let job_ids_before: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
-        println!("Sorting jobs by execution time and memory before: {:?}", job_ids_before);
+        // println!("Sorting jobs by execution time and memory before: {:?}", job_ids_before);
         
         let futures: Vec<_> = jobs.iter().map(|job| {
             let cwasm_file = job.binary_path.replace(".wasm", ".cwasm");
@@ -166,7 +181,11 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
         
         // Use the jobs we already have locked instead of calling get_jobs() again
         let job_ids_after: Vec<_> = jobs.iter().map(|job| job.id.clone()).collect();
-        println!("Sorting jobs by execution time (desc) and memory (asc) after: {:?}", job_ids_after);
+        // println!("Sorting jobs by execution time (desc) and memory (asc) after: {:?}", job_ids_after);
+        
+        // Check how many jobs have changed index after sorting
+        let changed_count = count_jobs_with_changed_index(&job_ids_before, &job_ids_after);
+        println!("[ORDER CHECK] Jobs with changed index: {} / {}", changed_count, job_ids_before.len());
     }
     
 }
