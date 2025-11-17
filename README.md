@@ -1,69 +1,105 @@
-To run this code on Rasberry
-1) Install Rust
-2) Add the ARM64 Linux target (Raspberry Pi 5 uses ARMv8/AArch64):
-    rustup target add aarch64-unknown-linux-gnu
-3) Create this file .cargo/config.tomp and add the following:
-    [target.aarch64-unknown-linux-gnu]
-    linker = "aarch64-unknown-linux-gnu-gcc"
-4) Run:
-    cargo build --release --target aarch64-unknown-linux-gnu
-    aarch64-unknown-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/rise-thesis
-    scp target/aarch64-unknown-linux-gnu/release/rise-thesis pi@pi@192.168.8.110:workspace
-    scp -r wasm-modules/ pi@192.168.8.110:workspace/ 
+# Rise Thesis - Scheduler
 
+## Overview
 
+This project is a scheduler system that manages and prioritizes WebAssembly (WASM) tasks based on memory and execution time predictions.
 
+## Required Repositories
 
-scp target/aarch64-unknown-linux-gnu/release/rise-thesis pi@192.168.0.234:workspace
-aarch64-unknown-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/rise-thesis
+To execute this project, you need the following repositories:
 
-Size optimizations:
-1) Add the following to cargo.toml 
-    [profile.release]
-    lto = true
-    codegen-units = 1
-    opt-level = "z"      # optimize for size
-    strip = "debuginfo"  # strip debug info
-2) strip target/aarch64-unknown-linux-gnu/release/rise-thesis
+1. **rise-thesis** - This repository (the scheduler)
+2. **rise-scheduler-experiments** - Creates requests for this scheduler
 
+## Additional Repositories Used
 
-# How to compile on raspberry pi 5:
+Three more repositories were used to create this project:
 
-# Copy code into the raspberri
-rm -rf target
-scp -r . pi@192.168.8.110:/home/pi/rise-thesis
+3. **rise-thesis-wasm-tasks** - Repository where all WASM components were created and uploaded. They all have a common input and output format.
+4. **rise-scheduler-models** - Creation and training of models that predict memory and execution time requirements of given tasks.
+5. **wasm-memory-calculation** - Used to gather data to train the memory-prediction and execution time models. In this repo, for each request, memory and time are measured and stored by running each task sequentially on a separate process initialized for each request and getting the peak memory used by this process.
 
-# Update system
-sudo apt update && sudo apt upgrade -y
+## Running the System
 
-# Install basic development tools (including OpenSSL development libraries)
-sudo apt install -y build-essential pkg-config libssl-dev libssl3 git curl
+### On Any OS
 
-# Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source ~/.cargo/env
-
-# Install ONNX Runtime development package
-# Download and install ONNX Runtime 1.22.0 fresh
-# Remove the old system libraries
-<!-- sudo rm /lib/aarch64-linux-gnu/libonnxruntime* -->
-
-# Remove any old libraries from /usr/local/lib
-<!-- sudo rm /usr/local/lib/libonnxruntime* -->
-
-cd /tmp
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-aarch64-1.22.0.tgz
-tar -xzf onnxruntime-linux-aarch64-1.22.0.tgz
-
-# Install to /usr/local/lib
-sudo cp -r onnxruntime-linux-aarch64-1.22.0/lib/* /usr/local/lib/
-
-# Update library cache
-sudo ldconfig
-
-# Verify - you should now see version 1.22
-ldconfig -p | grep onnxruntime
-
-
+```bash
 cargo build --release
-target/release/rise-thesis
+./target/release/rise-thesis
+```
+
+### On rise-scheduler-experiments
+
+1. Create Python virtual environment and install requirements:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
+
+2. Activate environment (if not already activated)
+
+3. Navigate to src directory:
+   ```bash
+   cd src
+   ```
+
+4. Run the main script:
+   ```bash
+   python main.py
+   ```
+
+### On Raspberry Pi 5 with Ubuntu
+
+Cross compilation didn't work on macOS due to the `ort` dependency that fails. Until this dependency issue is solved, the way to run it is:
+
+1. Find the IP of your Raspberry Pi and connect via SSH:
+   ```bash
+   ssh pi@<ip>
+   # Example: ssh pi@192.168.8.110
+   ```
+
+2. Install dependencies:
+   ```bash
+   sudo apt update && sudo apt upgrade -y
+   
+   # Install basic development tools
+   sudo apt install -y build-essential pkg-config libssl-dev git curl
+   
+   # Install Rust
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+   
+   # Install ONNX Runtime development package
+   sudo apt install libonnxruntime-dev
+   
+   # Verify it's installed
+   dpkg -L libonnxruntime-dev | grep "\.so"
+   # Should show: /usr/lib/aarch64-linux-gnu/libonnxruntime.so
+   
+   # Set the environment variable to point to the correct directory
+   export ORT_LIB_LOCATION=/usr/lib/aarch64-linux-gnu
+   export ORT_STRATEGY=system
+   
+   # Also add it to the library path
+   export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH
+   ```
+
+3. Copy the project from host to Pi:
+   ```bash
+   # On Pi: Create folder
+   mkdir rise-thesis
+   
+   # On Host: Copy project
+   scp -r . pi@192.168.8.110:/home/pi/memory-estimator
+   ```
+
+4. Build the project:
+   ```bash
+   cargo build --release
+   ```
+
+5. Run the application:
+   ```bash
+   ./target/release/memory-estimator
+   ```
+
