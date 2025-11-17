@@ -260,34 +260,102 @@ impl Worker{
                     return;
                 }
                 
-                // Retrieve the next task from SubmittedJobs (pops it out, removing it from storage)
-                let my_task: Option<Job> = self.submitted_jobs.pop_next_job().await;
+                // Try to get one I/O-bound and one CPU-bound task
+                let io_task_opt = self.submitted_jobs.get_next_io_bounded_job().await;
+                let cpu_task_opt = self.submitted_jobs.get_next_cpu_bounded_job().await;
                 
-                match my_task{
-                    None=> {
-                        // No more tasks available, wait for next execution signal
-                        if self.submitted_jobs.get_num_tasks().await == 0 {
-                            break;
-                        }
-                    },
-                    Some(my_task_1)=>{
-                        let task_id = my_task_1.id.clone();
-                        // Decompress payload if needed (moved from handler to avoid blocking)
-                        let payload: String = if my_task_1.payload_compressed {
-                            match decompress_payload(&my_task_1.payload) {
-                                Ok(decompressed) => decompressed,
-                                Err(e) => {
-                                    eprintln!("Failed to decompress payload for task {}: {}", task_id, e);
-                                    my_task_1.payload.clone() // Fallback to original
-                                }
+                // Check if we have any tasks
+                let has_io_task = io_task_opt.is_some();
+                let has_cpu_task = cpu_task_opt.is_some();
+                
+                // Process both tasks concurrently if available
+                let mut handles = Vec::new();
+                
+                // Spawn I/O-bound task if available
+                if let Some(my_task_1) = io_task_opt {
+                    let task_id = my_task_1.id.clone();
+                    // Decompress payload if needed
+                    let payload: String = if my_task_1.payload_compressed {
+                        match decompress_payload(&my_task_1.payload) {
+                            Ok(decompressed) => decompressed,
+                            Err(e) => {
+                                eprintln!("Failed to decompress payload for task {}: {}", task_id, e);
+                                my_task_1.payload.clone()
                             }
-                        } else {
-                            my_task_1.payload.clone()
+                        }
+                    } else {
+                        my_task_1.payload.clone()
+                    };
+                    let func_name = my_task_1.func_name.clone();
+                    let folder_to_mount = my_task_1.folder_to_mount.clone();
+                    let binary_path = my_task_1.binary_path.clone();
+                    let wasm_loader = self.wasm_loader.clone();
+                    let scheduler_ref = self.scheduler.clone();
+                    let core_id = self.core_id;
+                    
+                    // Spawn I/O-bound task to run concurrently
+                    let handle = tokio::spawn(async move {
+                        let handler = Worker::run_wasm_job_component(
+                            core_id, task_id.clone(), binary_path, func_name, payload, folder_to_mount, wasm_loader
+                        ).await;
+                        let completed_task_id = match handler.await {
+                            Ok((task_id_result, _result)) => task_id_result,
+                            Err(_) => task_id.clone(),
                         };
-                        let func_name = my_task_1.func_name.clone();
-                        let folder_to_mount = my_task_1.folder_to_mount.clone();
-                        let _res = self.run_job(task_id, my_task_1.binary_path, func_name, payload, folder_to_mount).await;
-                        ()
+                        if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
+                            scheduler.lock().await.on_task_completed(completed_task_id).await;
+                        }
+                    });
+                    handles.push(handle);
+                }
+                
+                // Spawn CPU-bound task if available
+                if let Some(my_task_1) = cpu_task_opt {
+                    let task_id = my_task_1.id.clone();
+                    // Decompress payload if needed
+                    let payload: String = if my_task_1.payload_compressed {
+                        match decompress_payload(&my_task_1.payload) {
+                            Ok(decompressed) => decompressed,
+                            Err(e) => {
+                                eprintln!("Failed to decompress payload for task {}: {}", task_id, e);
+                                my_task_1.payload.clone()
+                            }
+                        }
+                    } else {
+                        my_task_1.payload.clone()
+                    };
+                    let func_name = my_task_1.func_name.clone();
+                    let folder_to_mount = my_task_1.folder_to_mount.clone();
+                    let binary_path = my_task_1.binary_path.clone();
+                    let wasm_loader = self.wasm_loader.clone();
+                    let scheduler_ref = self.scheduler.clone();
+                    let core_id = self.core_id;
+                    
+                    // Spawn CPU-bound task to run concurrently
+                    let handle = tokio::spawn(async move {
+                        let handler = Worker::run_wasm_job_component(
+                            core_id, task_id.clone(), binary_path, func_name, payload, folder_to_mount, wasm_loader
+                        ).await;
+                        let completed_task_id = match handler.await {
+                            Ok((task_id_result, _result)) => task_id_result,
+                            Err(_) => task_id.clone(),
+                        };
+                        if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
+                            scheduler.lock().await.on_task_completed(completed_task_id).await;
+                        }
+                    });
+                    handles.push(handle);
+                }
+                
+                // Wait for all spawned tasks to complete
+                for handle in handles {
+                    let _ = handle.await;
+                }
+                
+                // If no tasks were found, check if queue is empty
+                if !has_io_task && !has_cpu_task {
+                    if self.submitted_jobs.get_num_tasks().await == 0 {
+                        break;
                     }
                 }
             }

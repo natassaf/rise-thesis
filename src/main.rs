@@ -56,7 +56,7 @@ async fn main() -> std::io::Result<()> {
     let core_ids: Vec<CoreId> = get_core_ids().expect("Failed to get core IDs");
     println!("core_ids: {:?}", core_ids);
 
-    // Load config from config.yaml file
+    // Load config from config.yaml file to get the number of workers/threads to spawn and whether it's cores should be pinned
     let config = load_config();
     let pin_cores = config.pin_cores;
     let num_workers_to_start = config.num_workers;

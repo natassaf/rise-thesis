@@ -32,6 +32,8 @@ use crate::api::api_objects::{SubmittedJobs, Job};
         completed_count: Arc<Mutex<usize>>, // Counter for completed tasks
         execution_start_time: Arc<Mutex<Option<std::time::Instant>>>, // Track when execution starts
         pin_cores: bool,
+        cpu_bound_task_ids: Arc<Mutex<Vec<String>>>, // CPU-bound task IDs
+        io_bound_task_ids: Arc<Mutex<Vec<String>>>,  // I/O-bound task IDs
     }
 
     impl SchedulerEngine{
@@ -58,6 +60,8 @@ use crate::api::api_objects::{SubmittedJobs, Job};
                 completed_count: Arc::new(Mutex::new(0)),
                 execution_start_time: Arc::new(Mutex::new(None)),
                 pin_cores,
+                cpu_bound_task_ids: Arc::new(Mutex::new(Vec::new())),
+                io_bound_task_ids: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -122,9 +126,20 @@ use crate::api::api_objects::{SubmittedJobs, Job};
             println!("=== Starting predictions and sorting with {} algorithm ===", scheduling_algorithm);
             
             // Schedule tasks using the selected algorithm (does predictions and sorting)
-            scheduler_algo.prioritize_tasks(&self.submitted_jobs).await;
+            let (io_bound_task_ids, cpu_bound_task_ids) = scheduler_algo.prioritize_tasks(&self.submitted_jobs).await;
+            
+            // Store the task ID sets in SchedulerEngine
+            let mut stored_cpu_bound = self.cpu_bound_task_ids.lock().await;
+            let mut stored_io_bound = self.io_bound_task_ids.lock().await;
+            *stored_cpu_bound = cpu_bound_task_ids.clone();
+            *stored_io_bound = io_bound_task_ids.clone();
+            
+            // Also store in SubmittedJobs so workers can access them
+            self.submitted_jobs.set_cpu_bound_task_ids(cpu_bound_task_ids.clone()).await;
+            self.submitted_jobs.set_io_bound_task_ids(io_bound_task_ids.clone()).await;
             
             println!("=== Predictions and sorting completed ===");
+            println!("=== Separated tasks: {} CPU-bound, {} I/O-bound ===", cpu_bound_task_ids.len(), io_bound_task_ids.len());
         }
 
         pub async fn execute_jobs(&mut self){
