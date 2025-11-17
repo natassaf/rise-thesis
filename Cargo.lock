@@ -2176,6 +2176,7 @@ dependencies = [
  "futures-util",
  "ndarray",
  "ort",
+ "rayon",
  "regex",
  "serde",
  "serde_json",

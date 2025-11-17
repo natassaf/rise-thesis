@@ -154,10 +154,128 @@ pub async fn predict_memory(memory_features: &Vec<f32>) -> f64 {
     let prediction_normalized_vec = vec![prediction_normalized];
     let prediction_denormalized = memory_target_scaler.inverse_transform(&prediction_normalized_vec);
     
-    println!("[DEBUG] Denormalized prediction: {}", prediction_denormalized[0]);
-    
     // Return the denormalized prediction
     prediction_denormalized[0] as f64
+}
+
+pub async fn predict_memory_batch(memory_features_batch: &[Vec<f32>]) -> Vec<f64> {
+    if memory_features_batch.is_empty() {
+        return Vec::new();
+    }
+    
+    let memory_features_scaler_path: &str = "src/optimized_scheduling_preprocessing/memory_prediction/memory_model/scaler_x.json";
+    let memory_target_scaler_path: &str = "src/optimized_scheduling_preprocessing/memory_prediction/memory_model/scaler_y.json";
+
+    let memory_features_scaler = StandardScaler::new(memory_features_scaler_path);
+    let memory_target_scaler = StandardScaler::new(memory_target_scaler_path);
+
+    // Normalize all features in the batch
+    let mut normalized_batch: Vec<Vec<f32>> = Vec::new();
+    for features in memory_features_batch {
+        let normalized = memory_features_scaler.transform(features);
+        normalized_batch.push(normalized);
+    }
+
+    // Initialize model if not already loaded
+    if MODEL_SESSION.get().is_none() {
+        if let Err(e) = initialize_model() {
+            eprintln!("[ERROR] Failed to initialize ONNX model: {:?}", e);
+            return vec![0.0; memory_features_batch.len()];
+        }
+    }
+
+    let batch_size = memory_features_batch.len();
+    let num_features = memory_features_batch[0].len();
+
+    // Create input array with shape (batch_size, num_features)
+    let mut all_features: Vec<f32> = Vec::with_capacity(batch_size * num_features);
+    for normalized_features in &normalized_batch {
+        all_features.extend_from_slice(normalized_features);
+    }
+
+    let input_array = match Array::from_shape_vec((batch_size, num_features), all_features) {
+        Ok(arr) => arr,
+        Err(e) => {
+            eprintln!("[ERROR] Failed to create input array: {:?}", e);
+            return vec![0.0; batch_size];
+        }
+    };
+
+    let input_array_dyn: ArrayD<f32> = input_array.into_dyn();
+    let input_value = match Value::from_array(input_array_dyn) {
+        Ok(value) => value,
+        Err(e) => {
+            eprintln!("[ERROR] Failed to create input value: {:?}", e);
+            return vec![0.0; batch_size];
+        }
+    };
+
+    // Run batch inference
+    let (output_shape, output_data) = {
+        let mut session_guard = match MODEL_SESSION.get() {
+            Some(s) => s.lock().await,
+            None => {
+                eprintln!("[ERROR] Model session not initialized");
+                return vec![0.0; batch_size];
+            }
+        };
+
+        let session = &mut *session_guard;
+        let input_name = session.inputs[0].name.clone();
+        let output_name = session.outputs[0].name.clone();
+
+        let outputs = match session.run(inputs![input_name.as_str() => input_value]) {
+            Ok(outputs) => outputs,
+            Err(e) => {
+                eprintln!("[ERROR] Failed to run inference: {:?}", e);
+                return vec![0.0; batch_size];
+            }
+        };
+
+        match outputs[output_name.as_str()].try_extract_tensor::<f32>() {
+            Ok((shape, data)) => (shape.to_vec(), data.to_vec()),
+            Err(e) => {
+                eprintln!("[ERROR] Failed to extract output tensor: {:?}", e);
+                return vec![0.0; batch_size];
+            }
+        }
+    };
+
+    // Extract predictions from batch output
+    let mut predictions_normalized = Vec::new();
+    if output_shape.len() == 2 {
+        // Output shape is (batch_size, num_outputs) or (num_batches, num_outputs)
+        let num_outputs = output_shape[1] as usize;
+        let actual_batch_size = output_shape[0] as usize;
+        for i in 0..actual_batch_size {
+            let idx = i * num_outputs;
+            if idx < output_data.len() {
+                predictions_normalized.push(output_data[idx]);
+            } else {
+                eprintln!("[ERROR] Index {} out of bounds for output_data.len()={}", idx, output_data.len());
+                predictions_normalized.push(0.0);
+            }
+        }
+    } else if output_shape.len() == 1 {
+        // Output shape is (batch_size,)
+        let actual_batch_size = output_shape[0] as usize;
+        if output_data.len() >= actual_batch_size {
+            predictions_normalized = output_data[..actual_batch_size].to_vec();
+        } else {
+            predictions_normalized = output_data.clone();
+            while predictions_normalized.len() < actual_batch_size {
+                predictions_normalized.push(0.0);
+            }
+        }
+    } else {
+        eprintln!("[ERROR] Unexpected output shape: {:?} for batch size {}", output_shape, batch_size);
+        return vec![0.0; batch_size];
+    }
+
+    // Denormalize all predictions
+    // For target scaler (scaler_y), mean and scale have only 1 element, so we use batch denormalization
+    let predictions_denormalized = memory_target_scaler.inverse_transform_batch(&predictions_normalized);
+    predictions_denormalized.into_iter().map(|p| p as f64).collect()
 }
 
 

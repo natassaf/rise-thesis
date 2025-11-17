@@ -2,14 +2,13 @@ use std::collections::HashMap;
 
 use actix_web::web;
 use async_trait::async_trait;
-use futures::future;
+use rayon::prelude::*;
 
-use crate::api::api_objects::SubmittedJobs;
-use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction::predict_memory;
-use crate::optimized_scheduling_preprocessing::features_extractor::build_memory_features;
+use crate::api::api_objects::{SubmittedJobs, Job};
+use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction::predict_memory_batch;
+use crate::optimized_scheduling_preprocessing::features_extractor::build_all_features;
 use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction_utils::MemoryFeatures;
-use crate::optimized_scheduling_preprocessing::execution_time_prediction::time_prediction::predict_time;
-use crate::optimized_scheduling_preprocessing::features_extractor::build_execution_time_features;
+use crate::optimized_scheduling_preprocessing::execution_time_prediction::time_prediction::predict_time_batch;
 
 /// Check how many jobs have changed index after sorting
 fn count_jobs_with_changed_index(job_ids_before: &[String], job_ids_after: &[String]) -> usize {
@@ -92,57 +91,88 @@ impl MemoryTimeAwareSchedulerAlgorithm{
         Self{}
     }
 
-    async fn predict_memory(&self, cwasm_file: &str, wat_file: &str, payload: &str, folder_to_mount: &str)->f64{
-        let memory_features = build_memory_features(&cwasm_file, &wat_file, &payload, &folder_to_mount).await;
-        let memory_features_vec = memory_features.to_vec();
-        let memory_prediction = predict_memory(&memory_features_vec).await;
-        return memory_prediction
-    }
-    async fn predict_time(&self, cwasm_file: &str, wat_file: &str, payload: &str, folder_to_mount: &str)->f64{
-        let time_features = build_execution_time_features(&cwasm_file, &wat_file, &payload, &folder_to_mount).await;
-        let time_features_vec = time_features.to_vec();
-        let time_prediction = predict_time(&time_features_vec).await;
-        return time_prediction
+    /// Extract features for all jobs in parallel using rayon
+    fn extract_features_parallel(jobs: &[Job]) -> Vec<(String, Vec<f32>, Vec<f32>)> {
+        jobs
+            .par_iter()
+            .map(|job| {
+                let cwasm_file = job.binary_path.replace(".wasm", ".cwasm");
+                let wat_file = job.binary_path.replace(".wasm", ".wat");
+                let payload = job.payload.clone();
+                let folder_to_mount = job.folder_to_mount.clone();
+                let job_id = job.id.clone();
+                
+                let (memory_features, time_features) = build_all_features(&cwasm_file, &wat_file, &payload, &folder_to_mount);
+                (job_id, memory_features.to_vec(), time_features.to_vec())
+            })
+            .collect()
     }
 }
 
 #[async_trait]
 impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
     async fn prioritize_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>) {
+        // Configuration: batch size for predictions
+        const BATCH_SIZE: usize = 150;
+        
         // for each job predict memory and time requirements
         let jobs = submitted_jobs.get_jobs().await;
         let job_ids_before: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
         // println!("Sorting jobs by execution time and memory before: {:?}", job_ids_before);
         
-        let futures: Vec<_> = jobs.iter().map(|job| {
-            let cwasm_file = job.binary_path.replace(".wasm", ".cwasm");
-            let wat_file = job.binary_path.replace(".wasm", ".wat");
-            let payload = job.payload.clone();
-            let folder_to_mount = job.folder_to_mount.clone();
-            let job_id = job.id.clone();
-            
-            // async move is needed here because:
-            // 1. The closure is collected into a Vec and will outlive the iterator
-            // 2. We need to take ownership of the cloned values (cwasm_file, wat_file, etc.)
-            // 3. The future will be awaited later, so we can't borrow from the outer scope
-            async move {
-                let memory_prediction = self.predict_memory(&cwasm_file, &wat_file, &payload, &folder_to_mount).await;
-                let time_prediction = self.predict_time(&cwasm_file, &wat_file, &payload, &folder_to_mount).await;
-                // Debug: Store memory_features and memory_prediction to results directory
-                // save_debug_memory_prediction(&job_id, &memory_features, memory_prediction);
-                
-                (job_id, memory_prediction, time_prediction)
-            }
-        }).collect();
+        if jobs.is_empty() {
+            return;
+        }
         
-        let predictions: Vec<(String, f64, f64)> = future::join_all(futures).await;
+        // Measure total time for feature extraction and prediction
+        let total_start = std::time::Instant::now();
+        
+        // Extract features for all jobs in parallel
+        let feature_results = Self::extract_features_parallel(&jobs);
+        
+        // Process predictions in batches
         let mut job_id_to_memory_prediction: HashMap<String, f64> = HashMap::new();
         let mut job_id_to_time_prediction: HashMap<String, f64> = HashMap::new();
         
-        for (job_id, memory_pred, time_pred) in predictions {
-            job_id_to_memory_prediction.insert(job_id.clone(), memory_pred);
-            job_id_to_time_prediction.insert(job_id, time_pred);
+        // Process in batches of BATCH_SIZE
+        for batch_start in (0..feature_results.len()).step_by(BATCH_SIZE) {
+            let batch_end = std::cmp::min(batch_start + BATCH_SIZE, feature_results.len());
+            let batch = &feature_results[batch_start..batch_end];
+            
+            // Collect features for this batch
+            let mut batch_job_ids: Vec<String> = Vec::new();
+            let mut memory_features_batch: Vec<Vec<f32>> = Vec::new();
+            let mut time_features_batch: Vec<Vec<f32>> = Vec::new();
+            
+            for (job_id, memory_features, time_features) in batch {
+                batch_job_ids.push(job_id.clone());
+                memory_features_batch.push(memory_features.clone());
+                time_features_batch.push(time_features.clone());
+            }
+            
+            println!("Processing prediction batch {}/{} ({} jobs)", 
+                     batch_start / BATCH_SIZE + 1, 
+                     (feature_results.len() + BATCH_SIZE - 1) / BATCH_SIZE,
+                     batch_job_ids.len());
+            
+            // Run batch predictions
+            let memory_predictions = predict_memory_batch(&memory_features_batch).await;
+            let time_predictions = predict_time_batch(&time_features_batch).await;
+            
+            // Store results
+            for (i, job_id) in batch_job_ids.iter().enumerate() {
+                if i < memory_predictions.len() {
+                    job_id_to_memory_prediction.insert(job_id.clone(), memory_predictions[i]);
+                }
+                if i < time_predictions.len() {
+                    job_id_to_time_prediction.insert(job_id.clone(), time_predictions[i]);
+                }
+            }
         }
+        
+        let total_duration = total_start.elapsed();
+        let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        std::fs::write(format!("results/timing_{}.txt", timestamp), format!("Total time: {:.2}ms\nJobs: {}", total_duration.as_secs_f64() * 1000.0, jobs.len())).unwrap_or_else(|e| eprintln!("Failed to write timing: {:?}", e));
         
         println!("job_id_to_memory_prediction: {:?}", job_id_to_memory_prediction);
         println!("job_id_to_time_prediction: {:?}", job_id_to_time_prediction);

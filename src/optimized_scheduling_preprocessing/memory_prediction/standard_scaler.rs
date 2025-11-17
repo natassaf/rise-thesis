@@ -33,6 +33,20 @@ impl StandardScaler {
             .map(|((&xi_scaled, &m), &s)| xi_scaled * s + m)
             .collect()
     }
+
+    /// Batch inverse transform for single-output scalers (when mean and scale have only 1 element)
+    /// This applies the same mean/scale to all values in the batch
+    pub fn inverse_transform_batch(&self, x_scaled: &[f32]) -> Vec<f32> {
+        if self.mean.is_empty() || self.scale.is_empty() {
+            return Vec::new();
+        }
+        let mean = self.mean[0];
+        let scale = self.scale[0];
+        x_scaled
+            .iter()
+            .map(|&xi_scaled| xi_scaled * scale + mean)
+            .collect()
+    }
 }
 
 

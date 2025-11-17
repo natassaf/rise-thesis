@@ -192,6 +192,57 @@ pub async fn build_memory_features(
     memory_features
 }
 
+/// Combined feature extraction that reads WAT file only once for both memory and time features
+/// This is more efficient than calling build_memory_features and build_execution_time_features separately
+pub fn build_all_features(
+    wasm_file: &str,
+    wat_file: &str,
+    payload: &str,
+    model_folder_name: &str,
+) -> (MemoryFeatures, ExecutionTimeFeatures) {
+    let mut memory_features = MemoryFeatures::new();
+    let mut time_features = ExecutionTimeFeatures::new();
+
+    // Binary size (read once, use for both)
+    let binary_size = fs::metadata(wasm_file).map(|m| m.len()).unwrap_or(0);
+    memory_features.binary_size_bytes = binary_size;
+    time_features.binary_size_bytes = binary_size;
+
+    // Read WAT file ONCE and extract features for both
+    extract_features_from_wat_batch(&wat_file, &mut memory_features, &mut time_features);
+
+    // Request payload and model size (compute once)
+    let payload_size = payload.len() as u64;
+    let model_size = compute_model_folder_size(model_folder_name);
+    
+    memory_features.request_payload_size = payload_size;
+    memory_features.model_file_size = model_size;
+    time_features.request_payload_size = payload_size;
+    time_features.model_file_size = model_size;
+
+    // Parse payload: try to extract n from JSON, fallback to length
+    memory_features.payload = if let Ok(parsed_data) = serde_json::from_str::<serde_json::Value>(payload) {
+        if let Some(n_value) = parsed_data.get("n") {
+            if let Some(n) = n_value.as_f64() {
+                n as i64
+            } else {
+                payload.len() as i64
+            }
+        } else {
+            payload.len() as i64
+        }
+    } else {
+        payload.len() as i64
+    };
+
+    // Extract binary name from the file path
+    let binary_name = wasm_file.split("/").last().unwrap();
+    memory_features.binary_name = binary_name.to_string();
+    time_features.binary_name = binary_name.to_string();
+
+    (memory_features, time_features)
+}
+
 pub fn compute_model_folder_size(model_folder_name: &str) -> u64 {
     if model_folder_name.is_empty() { return 0; }
     let base = if cfg!(target_os = "linux") {
