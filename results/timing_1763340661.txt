@@ -1,2 +1,0 @@
-Total time: 14795.54ms
-Jobs: 145
