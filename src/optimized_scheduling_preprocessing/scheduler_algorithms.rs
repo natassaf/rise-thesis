@@ -107,36 +107,18 @@ impl MemoryTimeAwareSchedulerAlgorithm{
             })
             .collect()
     }
-}
 
-#[async_trait]
-impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
-    async fn prioritize_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>) {
-        // Configuration: batch size for predictions
-        const BATCH_SIZE: usize = 150;
-        
-        // for each job predict memory and time requirements
-        let jobs = submitted_jobs.get_jobs().await;
-        let job_ids_before: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
-        // println!("Sorting jobs by execution time and memory before: {:?}", job_ids_before);
-        
-        if jobs.is_empty() {
-            return;
-        }
-        
-        // Measure total time for feature extraction and prediction
-        let total_start = std::time::Instant::now();
-        
-        // Extract features for all jobs in parallel
-        let feature_results = Self::extract_features_parallel(&jobs);
-        
-        // Process predictions in batches
+    /// Process predictions in batches and return memory and time predictions
+    async fn process_predictions_in_batches(
+        feature_results: &[(String, Vec<f32>, Vec<f32>)],
+        batch_size: usize,
+    ) -> (HashMap<String, f64>, HashMap<String, f64>) {
         let mut job_id_to_memory_prediction: HashMap<String, f64> = HashMap::new();
         let mut job_id_to_time_prediction: HashMap<String, f64> = HashMap::new();
         
         // Process in batches of BATCH_SIZE
-        for batch_start in (0..feature_results.len()).step_by(BATCH_SIZE) {
-            let batch_end = std::cmp::min(batch_start + BATCH_SIZE, feature_results.len());
+        for batch_start in (0..feature_results.len()).step_by(batch_size) {
+            let batch_end = std::cmp::min(batch_start + batch_size, feature_results.len());
             let batch = &feature_results[batch_start..batch_end];
             
             // Collect features for this batch
@@ -151,8 +133,8 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
             }
             
             println!("Processing prediction batch {}/{} ({} jobs)", 
-                     batch_start / BATCH_SIZE + 1, 
-                     (feature_results.len() + BATCH_SIZE - 1) / BATCH_SIZE,
+                     batch_start / batch_size + 1, 
+                     (feature_results.len() + batch_size - 1) / batch_size,
                      batch_job_ids.len());
             
             // Run batch predictions
@@ -170,6 +152,34 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
             }
         }
         
+        (job_id_to_memory_prediction, job_id_to_time_prediction)
+    }
+}
+
+#[async_trait]
+impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
+    async fn prioritize_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>) {
+        // Configuration: batch size for predictions
+        const BATCH_SIZE: usize = 20;
+        
+        // for each job predict memory and time requirements
+        let jobs = submitted_jobs.get_jobs().await;
+        let job_ids_before: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
+        
+        if jobs.is_empty() {
+            return;
+        }
+        
+        // Measure total time for feature extraction and prediction
+        let total_start = std::time::Instant::now();
+        
+        // Extract features for all jobs in parallel
+        let feature_results = Self::extract_features_parallel(&jobs);
+        
+        // Process predictions in batches
+        let (job_id_to_memory_prediction, job_id_to_time_prediction) = 
+            Self::process_predictions_in_batches(&feature_results, BATCH_SIZE).await;
+        
         let total_duration = total_start.elapsed();
         let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         std::fs::write(format!("results/timing_{}.txt", timestamp), format!("Total time: {:.2}ms\nJobs: {}", total_duration.as_secs_f64() * 1000.0, jobs.len())).unwrap_or_else(|e| eprintln!("Failed to write timing: {:?}", e));
@@ -177,16 +187,16 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
         println!("job_id_to_memory_prediction: {:?}", job_id_to_memory_prediction);
         println!("job_id_to_time_prediction: {:?}", job_id_to_time_prediction);
         
-        // Update jobs with memory and time predictions
+        // Update jobs with memory and time predictions in parallel
         let mut jobs = submitted_jobs.jobs.lock().await;
-        for job in jobs.iter_mut() {
+        jobs.par_iter_mut().for_each(|job| {
             if let Some(prediction) = job_id_to_memory_prediction.get(&job.id) {
                 job.memory_prediction = Some(*prediction);
             }
             if let Some(prediction) = job_id_to_time_prediction.get(&job.id) {
                 job.execution_time_prediction = Some(*prediction);
             }
-        }
+        });
         
         // Sort jobs:
         // 1. First by execution time from largest to shortest (descending)
@@ -211,9 +221,8 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
         
         // Use the jobs we already have locked instead of calling get_jobs() again
         let job_ids_after: Vec<_> = jobs.iter().map(|job| job.id.clone()).collect();
-        // println!("Sorting jobs by execution time (desc) and memory (asc) after: {:?}", job_ids_after);
         
-        // Check how many jobs have changed index after sorting
+        // Sanity check: how many jobs have changed index after sorting
         let changed_count = count_jobs_with_changed_index(&job_ids_before, &job_ids_after);
         println!("[ORDER CHECK] Jobs with changed index: {} / {}", changed_count, job_ids_before.len());
     }
