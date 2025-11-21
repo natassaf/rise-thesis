@@ -184,7 +184,7 @@ impl Worker{
     //     ()
     // }
     
-    pub async fn run_wasm_job_component(core_id: CoreId, task_id: String, component_name:String, func_name:String, payload:String, folder_to_mount:String, shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>)->task::JoinHandle<(String, Result<Vec<Val>, anyhow::Error>)>{
+    pub async fn run_wasm_job_component(core_id: CoreId, task_id: String, component_name:String, func_name:String, payload:String, shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>)->task::JoinHandle<(String, Result<Vec<Val>, anyhow::Error>)>{
         // Set up Wasmtime engine and module outside blocking
         // let component_name ="math_tasks".to_string();
         println!("Running component {:?}, func: {:?}", component_name, func_name);
@@ -219,24 +219,63 @@ impl Worker{
         handler
     }
 
-    pub async fn  run_job(&self, task_id:String, binary_path: String, func_name:String, payload:String, folder_to_mount:String){
-        let core_id: CoreId = self.core_id.clone(); // clone cause we need to pass by value a copy on each thread and it is bound to self
-        let task_module_path = binary_path;
-        let scheduler_ref = self.scheduler.clone();
+    // pub async fn  run_job(&self, task_id:String, binary_path: String, func_name:String, payload:String, folder_to_mount:String){
+    //     let core_id: CoreId = self.core_id.clone(); // clone cause we need to pass by value a copy on each thread and it is bound to self
+    //     let task_module_path = binary_path;
+    //     let scheduler_ref = self.scheduler.clone();
         
-        // Spawn a blocking task to map the worker to the core 
-        let handler = Self::run_wasm_job_component(core_id, task_id.clone() ,task_module_path, func_name, payload, folder_to_mount, self.wasm_loader.clone()).await;
+    //     // Spawn a blocking task to map the worker to the core 
+    //     let handler = Self::run_wasm_job_component(core_id, task_id.clone() ,task_module_path, func_name, payload, folder_to_mount, self.wasm_loader.clone()).await;
         
-        // Wait for task to complete and get the task_id back
-        // Note: handler.await returns Result<(String, Result<...>), JoinError>
-        let completed_task_id = match handler.await {
-            Ok((task_id_result, _result)) => task_id_result,
-            Err(_) => task_id.clone(), // If join failed, use original task_id
-        };
+    //     // Wait for task to complete and get the task_id back
+    //     // Note: handler.await returns Result<(String, Result<...>), JoinError>
+    //     let completed_task_id = match handler.await {
+    //         Ok((task_id_result, _result)) => task_id_result,
+    //         Err(_) => task_id.clone(), // If join failed, use original task_id
+    //     };
         
-        // Notify scheduler that task is complete
-        if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
-            scheduler.lock().await.on_task_completed(completed_task_id).await;
+    //     // Notify scheduler that task is complete
+    //     if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
+    //         scheduler.lock().await.on_task_completed(completed_task_id).await;
+    //     }
+    // }
+
+    pub async fn run_task_asynchronously(&self, task: Option<Job>, handles:&mut Vec<tokio::task::JoinHandle<()>>){
+        // Spawn I/O-bound task if available
+        if let Some(my_task_1) = task {
+            let task_id = my_task_1.id.clone();
+            // Decompress payload if needed
+            let payload: String = if my_task_1.payload_compressed {
+                match decompress_payload(&my_task_1.payload) {
+                    Ok(decompressed) => decompressed,
+                    Err(e) => {
+                        eprintln!("Failed to decompress payload for task {}: {}", task_id, e);
+                        my_task_1.payload.clone()
+                    }
+                }
+            } else {
+                my_task_1.payload.clone()
+            };
+            let func_name = my_task_1.func_name.clone();
+            let binary_path = my_task_1.binary_path.clone();
+            let wasm_loader = self.wasm_loader.clone();
+            let scheduler_ref = self.scheduler.clone();
+            let core_id = self.core_id;
+            
+            // Spawn I/O-bound task to run concurrently
+            let handle = tokio::spawn(async move {
+                let handler = Worker::run_wasm_job_component(
+                    core_id, task_id.clone(), binary_path, func_name, payload, wasm_loader
+                ).await;
+                let completed_task_id = match handler.await {
+                    Ok((task_id_result, _result)) => task_id_result,
+                    Err(_) => task_id.clone(),
+                };
+                if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
+                    scheduler.lock().await.on_task_completed(completed_task_id).await;
+                }
+            });
+            handles.push(handle);
         }
     }
 
@@ -271,82 +310,9 @@ impl Worker{
                 // Process both tasks concurrently if available
                 let mut handles = Vec::new();
                 
-                // Spawn I/O-bound task if available
-                if let Some(my_task_1) = io_task_opt {
-                    let task_id = my_task_1.id.clone();
-                    // Decompress payload if needed
-                    let payload: String = if my_task_1.payload_compressed {
-                        match decompress_payload(&my_task_1.payload) {
-                            Ok(decompressed) => decompressed,
-                            Err(e) => {
-                                eprintln!("Failed to decompress payload for task {}: {}", task_id, e);
-                                my_task_1.payload.clone()
-                            }
-                        }
-                    } else {
-                        my_task_1.payload.clone()
-                    };
-                    let func_name = my_task_1.func_name.clone();
-                    let folder_to_mount = my_task_1.folder_to_mount.clone();
-                    let binary_path = my_task_1.binary_path.clone();
-                    let wasm_loader = self.wasm_loader.clone();
-                    let scheduler_ref = self.scheduler.clone();
-                    let core_id = self.core_id;
+                self.run_task_asynchronously(io_task_opt, &mut handles).await;
+                self.run_task_asynchronously(cpu_task_opt, &mut handles).await;
                     
-                    // Spawn I/O-bound task to run concurrently
-                    let handle = tokio::spawn(async move {
-                        let handler = Worker::run_wasm_job_component(
-                            core_id, task_id.clone(), binary_path, func_name, payload, folder_to_mount, wasm_loader
-                        ).await;
-                        let completed_task_id = match handler.await {
-                            Ok((task_id_result, _result)) => task_id_result,
-                            Err(_) => task_id.clone(),
-                        };
-                        if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
-                            scheduler.lock().await.on_task_completed(completed_task_id).await;
-                        }
-                    });
-                    handles.push(handle);
-                }
-                
-                // Spawn CPU-bound task if available
-                if let Some(my_task_1) = cpu_task_opt {
-                    let task_id = my_task_1.id.clone();
-                    // Decompress payload if needed
-                    let payload: String = if my_task_1.payload_compressed {
-                        match decompress_payload(&my_task_1.payload) {
-                            Ok(decompressed) => decompressed,
-                            Err(e) => {
-                                eprintln!("Failed to decompress payload for task {}: {}", task_id, e);
-                                my_task_1.payload.clone()
-                            }
-                        }
-                    } else {
-                        my_task_1.payload.clone()
-                    };
-                    let func_name = my_task_1.func_name.clone();
-                    let folder_to_mount = my_task_1.folder_to_mount.clone();
-                    let binary_path = my_task_1.binary_path.clone();
-                    let wasm_loader = self.wasm_loader.clone();
-                    let scheduler_ref = self.scheduler.clone();
-                    let core_id = self.core_id;
-                    
-                    // Spawn CPU-bound task to run concurrently
-                    let handle = tokio::spawn(async move {
-                        let handler = Worker::run_wasm_job_component(
-                            core_id, task_id.clone(), binary_path, func_name, payload, folder_to_mount, wasm_loader
-                        ).await;
-                        let completed_task_id = match handler.await {
-                            Ok((task_id_result, _result)) => task_id_result,
-                            Err(_) => task_id.clone(),
-                        };
-                        if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
-                            scheduler.lock().await.on_task_completed(completed_task_id).await;
-                        }
-                    });
-                    handles.push(handle);
-                }
-                
                 // Wait for all spawned tasks to complete
                 for handle in handles {
                     let _ = handle.await;

@@ -1,0 +1,8 @@
+
+
+## New branch
+Total tasks processed: 150
+Total execution time: 235.64 seconds (235640.00 ms)
+Average time per task: 1570.93 ms
+Throughput: 0.64 tasks/second
+Evaluation metrics written to results/evaluation_metrics.txt

@@ -45,7 +45,7 @@ use crate::api::api_objects::{SubmittedJobs, Job};
             
             // Create a single shared WasmComponentLoader instance wrapped in Arc<Mutex>
             // Mount the model_1 directory so ONNX models can be accessed
-            let shared_wasm_loader = Arc::new(Mutex::new(crate::wasm_loaders::WasmComponentLoader::new("models".to_string())));
+            let shared_wasm_loader = Arc::new(Mutex::new(crate::wasm_loaders::WasmComponentLoader::new("/home/pi/rise-thesis/models".to_string())));
             
             // Create workers with the shared wasm_loader, reference to submitted_jobs, and execution_notify
             let workers: Vec<Arc<Worker>> = core_ids[0..num_workers_to_start].iter().map(|core_id| {

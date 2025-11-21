@@ -120,16 +120,38 @@ impl WasmComponentLoader{
             "" => {WasiCtxBuilder::new()
             .inherit_stdio()
             .build()}
-            _ => {WasiCtxBuilder::new()
-            .inherit_stdio()
-            .preopened_dir(
-                folder_to_mount.clone(),   // host path
-                folder_to_mount.clone(),  // guest path
-                DirPerms::READ,
-                FilePerms::READ,
-            )
-            .unwrap()
-            .build()
+            _ => {
+                // Canonicalize the path to ensure it's absolute and exists
+                let host_path = std::fs::canonicalize(&folder_to_mount)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Warning: Failed to canonicalize path '{}': {}. Using as-is.", folder_to_mount, e);
+                        std::path::PathBuf::from(&folder_to_mount)
+                    });
+                
+                // Use the same path for guest path so WASM code can access it with absolute paths
+                let host_path_str = host_path.to_string_lossy().to_string();
+                let guest_path = host_path_str.clone();
+                
+                println!("Preopening directory - host: '{}', guest: '{}'", host_path_str, guest_path);
+                
+                // Verify the directory exists before preopening
+                if !std::path::Path::new(&host_path_str).exists() {
+                    eprintln!("ERROR: Directory '{}' does not exist! Cannot preopen.", host_path_str);
+                }
+                
+                WasiCtxBuilder::new()
+                    .inherit_stdio()
+                    .preopened_dir(
+                        host_path_str.clone(),   // host path (canonicalized absolute path)
+                        guest_path.clone(),      // guest path (same as host so WASM can use absolute paths)
+                        DirPerms::READ,
+                        FilePerms::READ,
+                    )
+                    .unwrap_or_else(|e| {
+                        eprintln!("ERROR: Failed to preopen directory '{}': {}", host_path_str, e);
+                        panic!("Failed to preopen directory: {}", e);
+                    })
+                    .build()
             }};
 
 
