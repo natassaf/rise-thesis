@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use crate::optimized_scheduling_preprocessing::features_extractor::TaskBoundType;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ExecuteTasksRequest{
@@ -35,6 +36,7 @@ pub struct Job{
     pub arrival_time: std::time::SystemTime, // Track when job was submitted for sorting
     pub memory_prediction: Option<f64>,
     pub execution_time_prediction: Option<f64>,
+    pub task_bound_type: Option<TaskBoundType>, // CPU bound, I/O bound, or Mixed
 }
 
 impl From<WasmJobRequest> for Job {
@@ -55,6 +57,7 @@ impl From<WasmJobRequest> for Job {
             arrival_time: std::time::SystemTime::now(), // Record arrival time for sorting
             memory_prediction: None,
             execution_time_prediction: None,
+            task_bound_type: None,
         }
     }
 }
@@ -63,12 +66,32 @@ impl From<WasmJobRequest> for Job {
 #[derive(Debug, Clone)]
 pub struct SubmittedJobs {
     pub jobs: Arc<Mutex<Vec<Job>>>,
+    pub io_bound_task_ids: Arc<Mutex<std::collections::HashSet<String>>>, // I/O-bound task IDs set
+    pub cpu_bound_task_ids: Arc<Mutex<std::collections::HashSet<String>>>, // CPU-bound task IDs set
 }
 
 impl SubmittedJobs{
     pub fn new()->Self{
         let tasks = Arc::new(Mutex::new(vec![]));
-        Self{jobs: tasks}
+        let io_bound_set = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let cpu_bound_set = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        Self{
+            jobs: tasks,
+            io_bound_task_ids: io_bound_set,
+            cpu_bound_task_ids: cpu_bound_set,
+        }
+    }
+
+    /// Set the I/O-bound task IDs set
+    pub async fn set_io_bound_task_ids(&self, task_ids: Vec<String>) {
+        let mut set = self.io_bound_task_ids.lock().await;
+        *set = task_ids.into_iter().collect();
+    }
+
+    /// Set the CPU-bound task IDs set
+    pub async fn set_cpu_bound_task_ids(&self, task_ids: Vec<String>) {
+        let mut set = self.cpu_bound_task_ids.lock().await;
+        *set = task_ids.into_iter().collect();
     }
 
     pub async fn remove_job(&self, job_id: String) {
@@ -95,6 +118,38 @@ impl SubmittedJobs{
         } else {
             Some(jobs.pop().unwrap())
         }
+    }
+
+    /// Get the next I/O-bound job from the jobs list
+    /// Iterates from start (index 0) to end and returns the first job whose ID is in the io_bound_task_ids set
+    /// Removes the job from the list when found
+    pub async fn get_next_io_bounded_job(&self) -> Option<Job> {
+        let io_bound_task_ids = self.io_bound_task_ids.lock().await;
+        let mut jobs = self.jobs.lock().await;
+        for i in 0..jobs.len() {
+            if let Some(task_id) = jobs.get(i).map(|job| &job.id) {
+                if io_bound_task_ids.contains(task_id) {
+                    return Some(jobs.remove(i));
+                }
+            }
+        }
+        None
+    }
+
+    /// Get the next CPU-bound job from the jobs list
+    /// Iterates from start (index 0) to end and returns the first job whose ID is in the cpu_bound_task_ids set
+    /// Removes the job from the list when found
+    pub async fn get_next_cpu_bounded_job(&self) -> Option<Job> {
+        let cpu_bound_task_ids = self.cpu_bound_task_ids.lock().await;
+        let mut jobs = self.jobs.lock().await;
+        for i in 0..jobs.len() {
+            if let Some(task_id) = jobs.get(i).map(|job| &job.id) {
+                if cpu_bound_task_ids.contains(task_id) {
+                    return Some(jobs.remove(i));
+                }
+            }
+        }
+        None
     }
 
     pub async fn add_task(&self, task: Job) {

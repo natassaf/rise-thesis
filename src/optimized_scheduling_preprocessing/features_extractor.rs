@@ -4,10 +4,21 @@ use std::io::{BufRead, BufReader};
 use crate::optimized_scheduling_preprocessing::execution_time_prediction::time_prediction_utils::ExecutionTimeFeatures;
 use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction_utils::MemoryFeatures;
 
+/// Enum to classify whether a task is I/O bound or CPU bound
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskBoundType {
+    /// Task is primarily I/O bound (file operations, network, etc.)
+    IoBound,
+    /// Task is primarily CPU bound (computation, processing, etc.)
+    CpuBound,
+    /// Task has mixed characteristics or cannot be determined
+    Mixed,
+}
+
 
 fn process_line(line: &str, memory_features:&mut MemoryFeatures, time_features: &mut ExecutionTimeFeatures, 
                 memory_regex: &Regex, table_regex: &Regex, data_size_regex: &Regex, 
-                local_regex: &Regex, locals_data: &mut Vec<u32>) {
+                local_regex: &Regex, locals_data: &mut Vec<u32>, io_operation_count: &mut u32) {
     // Linear memory
     if let Some(c) = memory_regex.captures(&line) {
         if let Ok(pages) = c[1].parse::<u32>() {
@@ -72,10 +83,27 @@ fn process_line(line: &str, memory_features:&mut MemoryFeatures, time_features: 
         memory_features.is_ml_workload = true;
         time_features.is_ml_workload = true;
     }
-
+    
+    // I/O operation detection - count WASI I/O imports
+    let io_keywords = [
+        "fd_read", "fd_write", "fd_seek", "fd_close", "fd_datasync", "fd_sync",
+        "path_open", "path_readlink", "path_rename", "path_symlink", "path_unlink_file",
+        "fd_prestat_get", "fd_prestat_dir_name", "fd_fdstat_get", "fd_fdstat_set_flags",
+        "fd_allocate", "fd_filestat_get", "fd_filestat_set_size", "fd_filestat_set_times",
+        "path_filestat_get", "path_filestat_set_times", "path_create_directory", "path_remove_directory",
+        "path_link", "poll_oneoff", "sock_recv", "sock_send", "sock_shutdown",
+        "wasi:filesystem", "wasi:io", "wasi:sockets", "wasi:cli",
+    ];
+    
+    for keyword in &io_keywords {
+        if lower.contains(keyword) {
+            *io_operation_count += 1;
+            break; // Count once per line
+        }
+    }
 }
 
-fn extract_features_from_wat_batch<'a>(wat_file: &str, memory_features:&'a mut MemoryFeatures, time_features: &'a mut ExecutionTimeFeatures) -> (&'a mut MemoryFeatures, &'a mut ExecutionTimeFeatures) {
+fn extract_features_from_wat_batch<'a>(wat_file: &str, memory_features:&'a mut MemoryFeatures, time_features: &'a mut ExecutionTimeFeatures) -> (&'a mut MemoryFeatures, &'a mut ExecutionTimeFeatures, u32) {
     // Compile regexes ONCE (outside the loop) - this is the key optimization!
     let memory_regex = Regex::new(r"\(memory\s+\(;\d+;\)\s+(\d+)\)").unwrap_or_else(|_| Regex::new("$").unwrap());
     let table_regex = Regex::new(r"\(table\s+\d+\s+(\d+)\s+funcref\)").unwrap_or_else(|_| Regex::new("$").unwrap());
@@ -87,13 +115,14 @@ fn extract_features_from_wat_batch<'a>(wat_file: &str, memory_features:&'a mut M
         Ok(f) => f,
         Err(e) => {
             eprintln!("[WARNING] Failed to open WAT file {}: {}. Skipping WAT feature extraction.", wat_file, e);
-            return (memory_features, time_features);
+            return (memory_features, time_features, 0);
         }
     };
     let reader = BufReader::new(file);
     
-    // Track locals for aggregate calculations
+    // Track locals for aggregate calculations and I/O operations
     let mut locals_data: Vec<u32> = Vec::new();
+    let mut io_operation_count: u32 = 0;
     
     // Process each line one by one (reads line-by-line, not all at once)
     for line_result in reader.lines() {
@@ -107,6 +136,7 @@ fn extract_features_from_wat_batch<'a>(wat_file: &str, memory_features:&'a mut M
             &data_size_regex,
             &local_regex,
             &mut locals_data,
+            &mut io_operation_count,
         );
     }
     
@@ -117,9 +147,66 @@ fn extract_features_from_wat_batch<'a>(wat_file: &str, memory_features:&'a mut M
             memory_features.total_local_variables as f32 / locals_data.len() as f32;
     }
     
-    (memory_features, time_features)
+    (memory_features, time_features, io_operation_count)
 }
 
+
+/// Determine if a task is I/O bound or CPU bound based on extracted features
+fn determine_task_bound_type(
+    io_operation_count: u32,
+    function_count: u32,
+    import_count: u32,
+    data_section_size: u64,
+    high_complexity_functions: u32,
+    is_ml_workload: bool,
+    model_file_size: u64,
+) -> TaskBoundType {
+    // Calculate I/O to function ratio - if I/O ops are a small percentage of functions, it's likely CPU bound
+    let io_to_function_ratio = if function_count > 0 {
+        io_operation_count as f32 / function_count as f32
+    } else {
+        0.0
+    };
+    
+    // ML workloads are often I/O bound due to model loading and data processing
+    // If it's an ML workload with significant I/O operations or model file, it's likely I/O bound
+    if is_ml_workload && (io_operation_count > 50 || model_file_size > 0) {
+        return TaskBoundType::IoBound;
+    }
+    
+    // Calculate I/O bound score
+    // Weight I/O operations by their ratio to functions - if ratio is low, I/O ops are less significant
+    // But also consider absolute I/O count - high absolute count suggests I/O bound even with many functions
+    let io_score = io_operation_count as f32 * 1.5 * (io_to_function_ratio + 0.1) + // I/O operations weighted by ratio + base
+                   (io_operation_count > 100) as u32 as f32 * 3.0 + // High absolute I/O count is strong indicator
+                   (data_section_size > 100_000) as u32 as f32 * 1.5 + // Large data sections suggest I/O
+                   (import_count > function_count / 2 && io_to_function_ratio > 0.1) as u32 as f32 * 1.0 + // Many imports WITH high I/O ratio
+                   (model_file_size > 1_000_000) as u32 as f32 * 2.0; // Large model files suggest I/O bound
+    
+    // Calculate CPU bound score
+    let cpu_score = function_count as f32 * 0.2 + // More functions suggest computation
+                    high_complexity_functions as f32 * 3.0 + // Complex functions are CPU intensive
+                    (function_count > 100 && io_to_function_ratio < 0.1 && io_operation_count < 50) as u32 as f32 * 4.0 + // Many functions, low I/O ratio, low absolute I/O
+                    (function_count > 200 && io_operation_count < 100) as u32 as f32 * 2.0; // Very high function count with low I/O
+    
+    // Determine bound type
+    // If I/O operations are very low (< 3) and function count is high, it's likely CPU bound
+    if io_operation_count < 3 && function_count > 50 {
+        TaskBoundType::CpuBound
+    } else if io_operation_count > 100 && io_to_function_ratio > 0.1 {
+        // High absolute I/O count with reasonable ratio
+        TaskBoundType::IoBound
+    } else if io_to_function_ratio > 0.2 && io_operation_count > 10 {
+        // High I/O to function ratio with significant I/O operations
+        TaskBoundType::IoBound
+    } else if io_score > cpu_score * 1.2 {
+        TaskBoundType::IoBound
+    } else if cpu_score > io_score * 1.2 {
+        TaskBoundType::CpuBound
+    } else {
+        TaskBoundType::Mixed
+    }
+}
 
 /// Combined feature extraction that reads WAT file only once for both memory and time features
 /// This is more efficient than calling build_memory_features and build_execution_time_features separately
@@ -128,7 +215,7 @@ pub fn build_all_features(
     wat_file: &str,
     payload: &str,
     model_folder_name: &str,
-) -> (MemoryFeatures, ExecutionTimeFeatures) {
+) -> (MemoryFeatures, ExecutionTimeFeatures, TaskBoundType) {
     let mut memory_features = MemoryFeatures::new();
     let mut time_features = ExecutionTimeFeatures::new();
 
@@ -138,7 +225,8 @@ pub fn build_all_features(
     time_features.binary_size_bytes = binary_size;
 
     // Read WAT file ONCE and extract features for both
-    extract_features_from_wat_batch(&wat_file, &mut memory_features, &mut time_features);
+    let (_, _, io_operation_count) = 
+        extract_features_from_wat_batch(&wat_file, &mut memory_features, &mut time_features);
 
     // Request payload and model size (compute once)
     let payload_size = payload.len() as u64;
@@ -169,7 +257,18 @@ pub fn build_all_features(
     memory_features.binary_name = binary_name.to_string();
     time_features.binary_name = binary_name.to_string();
 
-    (memory_features, time_features)
+    // Determine task bound type
+    let task_bound_type = determine_task_bound_type(
+        io_operation_count,
+        memory_features.function_count,
+        memory_features.import_count,
+        memory_features.data_section_size_bytes,
+        memory_features.high_complexity_functions,
+        memory_features.is_ml_workload,
+        memory_features.model_file_size,
+    );
+    
+    (memory_features, time_features, task_bound_type)
 }
 
 pub fn compute_model_folder_size(model_folder_name: &str) -> u64 {
@@ -260,7 +359,7 @@ mod tests {
         let mut features_new = create_default_memory_features();
         // Create a temporary ExecutionTimeFeatures for the test
         let mut time_features_test = ExecutionTimeFeatures::new();
-        extract_features_from_wat_batch(&wat_file, &mut features_new, &mut time_features_test);
+        let (_, _, _) = extract_features_from_wat_batch(&wat_file, &mut features_new, &mut time_features_test);
         
         println!("features_new.linear_memory_bytes: {:?}", features_new.linear_memory_bytes);
         assert_eq!(
@@ -564,6 +663,123 @@ mod tests {
         
         println!("✓ All fields match for test_case_1!");
     }
+
+    #[test]
+    fn test_task_bound_type_detection() {
+        use std::path::Path;
+
+        // Test CPU bound tasks
+        println!("\n=== Testing CPU Bound Tasks ===");
+        
+        // Test 1: matrix_multiplication_component (should be CPU bound)
+        let (wat_file_1, wasm_file_1) = get_test_case_2();
+        assert!(
+            Path::new(&wat_file_1).exists(),
+            "Test file {} does not exist",
+            wat_file_1
+        );
+        assert!(
+            Path::new(&wasm_file_1).exists(),
+            "Test file {} does not exist",
+            wasm_file_1
+        );
+        
+        let payload = r#"{"n": 10}"#;
+        let model_folder_name = "";
+        
+        // Extract features to get io_operation_count for debugging
+        let mut mem_features = MemoryFeatures::new();
+        let mut time_features = ExecutionTimeFeatures::new();
+        let (_, _, io_ops_1) = extract_features_from_wat_batch(&wat_file_1, &mut mem_features, &mut time_features);
+        
+        let (memory_features_1, _, task_bound_type_1) = build_all_features(
+            &wasm_file_1,
+            &wat_file_1,
+            payload,
+            model_folder_name,
+        );
+        
+        println!("matrix_multiplication_component - io_ops: {}, functions: {}, imports: {}, data_size: {}, high_complexity: {}",
+                 io_ops_1, memory_features_1.function_count, 
+                 memory_features_1.import_count, memory_features_1.data_section_size_bytes,
+                 memory_features_1.high_complexity_functions);
+        println!("matrix_multiplication_component task_bound_type: {:?}", task_bound_type_1);
+        assert_eq!(
+            task_bound_type_1,
+            TaskBoundType::CpuBound,
+            "matrix_multiplication_component should be detected as CPU bound"
+        );
+        
+        // Test 2: fibonacci_optimized (should be CPU bound)
+        let (wat_file_2, wasm_file_2) = get_test_case_1();
+        assert!(
+            Path::new(&wat_file_2).exists(),
+            "Test file {} does not exist",
+            wat_file_2
+        );
+        assert!(
+            Path::new(&wasm_file_2).exists(),
+            "Test file {} does not exist",
+            wasm_file_2
+        );
+        
+        let (_, _, task_bound_type_2) = build_all_features(
+            &wasm_file_2,
+            &wat_file_2,
+            payload,
+            model_folder_name,
+        );
+        
+        println!("fibonacci_optimized task_bound_type: {:?}", task_bound_type_2);
+        assert_eq!(
+            task_bound_type_2,
+            TaskBoundType::CpuBound,
+            "fibonacci_optimized should be detected as CPU bound"
+        );
+        
+        // Test IO bound task
+        println!("\n=== Testing IO Bound Task ===");
+        
+        // Test 3: image_classification_resnet_onnx_batch (should be IO bound)
+        let wat_file_3 = "wasm-modules/image_classification_resnet_onnx_batch.wat";
+        let wasm_file_3 = "wasm-modules/image_classification_resnet_onnx_batch.wasm";
+        
+        assert!(
+            Path::new(&wat_file_3).exists(),
+            "Test file {} does not exist",
+            wat_file_3
+        );
+        assert!(
+            Path::new(&wasm_file_3).exists(),
+            "Test file {} does not exist",
+            wasm_file_3
+        );
+        
+        // Extract features to get io_operation_count for debugging
+        let mut mem_features_3 = MemoryFeatures::new();
+        let mut time_features_3 = ExecutionTimeFeatures::new();
+        let (_, _, io_ops_3) = extract_features_from_wat_batch(&wat_file_3, &mut mem_features_3, &mut time_features_3);
+        
+        let (memory_features_3, _, task_bound_type_3) = build_all_features(
+            &wasm_file_3,
+            &wat_file_3,
+            payload,
+            model_folder_name,
+        );
+        
+        println!("image_classification_resnet_onnx_batch - io_ops: {}, functions: {}, imports: {}, data_size: {}, high_complexity: {}",
+                 io_ops_3, memory_features_3.function_count, 
+                 memory_features_3.import_count, memory_features_3.data_section_size_bytes,
+                 memory_features_3.high_complexity_functions);
+        println!("image_classification_resnet_onnx_batch task_bound_type: {:?}", task_bound_type_3);
+        assert_eq!(
+            task_bound_type_3,
+            TaskBoundType::IoBound,
+            "image_classification_resnet_onnx_batch should be detected as IO bound"
+        );
+        
+        println!("\n✓ All task bound type detections passed!");
+    }
 }
 
 
@@ -584,7 +800,7 @@ pub async fn build_execution_time_features(
     // Read WAT using existing extract_features_from_wat_batch
     // Create a temporary MemoryFeatures to extract all features, and populate time_features at the same time
     let mut memory_features = MemoryFeatures::new();
-    extract_features_from_wat_batch(&wat_file, &mut memory_features, &mut time_features);
+    let (_, _, _) = extract_features_from_wat_batch(&wat_file, &mut memory_features, &mut time_features);
 
     // Request payload and model size
     time_features.request_payload_size = payload.len() as u64;
@@ -613,7 +829,7 @@ pub async fn build_memory_features(
     // Read WAT
     // Create a temporary ExecutionTimeFeatures (not used, but required by the function)
     let mut time_features = ExecutionTimeFeatures::new();
-    extract_features_from_wat_batch(&wat_file, &mut memory_features, &mut time_features);
+    let (_, _, _) = extract_features_from_wat_batch(&wat_file, &mut memory_features, &mut time_features);
 
     // Request payload and model size
     memory_features.request_payload_size = payload.len() as u64;

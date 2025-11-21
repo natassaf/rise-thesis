@@ -1,3 +1,9 @@
+
+pub enum TaskBoundType{
+    IOBounded,
+    CPUBounded,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecutionTimeFeatures {
     pub binary_name: String,
