@@ -64,7 +64,7 @@ Cross compilation didn't work on macOS due to the `ort` dependency that fails. U
    # On Host: Copy project
    cargo clean 
    
-   scp -r . pi@192.168.8.110:/home/pi/memory-estimator
+   scp -r . pi@192.168.8.110:/home/pi/rise-thesis
    ```
 
 4. Build the project:
@@ -74,7 +74,7 @@ Cross compilation didn't work on macOS due to the `ort` dependency that fails. U
 
 5. Run the application:
    ```bash
-   ./target/release/memory-estimator
+   ./target/release/rise-thesis
    ```
 
 

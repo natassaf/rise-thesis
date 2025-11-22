@@ -152,6 +152,15 @@ impl SubmittedJobs{
         None
     }
 
+    pub async fn get_next_job(&self) -> Option<Job> {
+        let mut jobs = self.jobs.lock().await;
+        if jobs.is_empty() {
+            None
+        } else {
+            Some(jobs.remove(0))
+        }
+    }
+
     pub async fn add_task(&self, task: Job) {
         let mut guard = self.jobs.lock().await;
         guard.push(task);

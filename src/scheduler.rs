@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
 
 use actix_web::web;
@@ -34,6 +35,7 @@ use crate::api::api_objects::{SubmittedJobs, Job};
         pin_cores: bool,
         cpu_bound_task_ids: Arc<Mutex<Vec<String>>>, // CPU-bound task IDs
         io_bound_task_ids: Arc<Mutex<Vec<String>>>,  // I/O-bound task IDs
+        response_time_per_task: Arc<StdMutex<HashMap<String, Duration>>>, // Track response time for each task
     }
 
     impl SchedulerEngine{
@@ -59,10 +61,15 @@ use crate::api::api_objects::{SubmittedJobs, Job};
                 task_status: Arc::new(Mutex::new(HashMap::new())),
                 completed_count: Arc::new(Mutex::new(0)),
                 execution_start_time: Arc::new(Mutex::new(None)),
+                response_time_per_task: Arc::new(StdMutex::new(HashMap::new())),
                 pin_cores,
                 cpu_bound_task_ids: Arc::new(Mutex::new(Vec::new())),
                 io_bound_task_ids: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+
+        pub async fn get_execution_start_time(&self) -> Option<std::time::Instant> {
+            self.execution_start_time.lock().await.clone()
         }
 
         pub async fn start_scheduler(&mut self, scheduler_arc: Arc<Mutex<SchedulerEngine>>)-> Result<Vec<tokio::task::JoinHandle<()>>, Error>{
@@ -161,69 +168,63 @@ use crate::api::api_objects::{SubmittedJobs, Job};
             self.execution_notify.notify_waiters();
         }
 
-        // Called by workers when a task completes (push notification)
-        pub async fn on_task_completed(&self, task_id: String) {
+        // Get response_time_per_task Arc (for passing to workers)
+        pub fn get_response_time_per_task(&self) -> Arc<StdMutex<HashMap<String, Duration>>> {
+            self.response_time_per_task.clone()
+        }
+
+        // Synchronous method to set response time for a task (can be called from blocking context)
+        pub fn set_response_time(&self, task_id: String, response_time: Duration) {
+            let mut response_times = self.response_time_per_task.lock().unwrap();
+            response_times.insert(task_id, response_time);
+        }
+
+        async fn set_task_status(&self, task_id: String, status: u8){
             let mut task_status = self.task_status.lock().await;
-            
-            // Check if task was already marked as completed (avoid double counting)
-            if let Some(status) = task_status.get(&task_id) {
-                if *status == 0 {
-                    // Mark as processed
-                    task_status.insert(task_id.clone(), 1);
-                    drop(task_status);
-                    
-                    // Increment completed counter
-                    let mut completed = self.completed_count.lock().await;
-                    *completed += 1;
-                    let completed_count = *completed;
-                    drop(completed);
-                    
-                    // Get total tasks
-                    let total_tasks = {
-                        let status = self.task_status.lock().await;
-                        status.len()
-                    };
-                    
-                    // Check if all tasks are complete
-                    if completed_count >= total_tasks {
-                        // All tasks completed - calculate and print timing
-                        let start_time_opt = {
-                            *self.execution_start_time.lock().await
-                        };
-                        
-                        if let Some(start_time) = start_time_opt {
-                            let elapsed = start_time.elapsed();
-                            let total_time_secs = elapsed.as_secs_f64();
-                            let total_time_ms = elapsed.as_millis() as f64;
-                            let avg_time_ms = if total_tasks > 0 {
-                                total_time_ms / total_tasks as f64
-                            } else {
-                                0.0
-                            };
-                            let throughput = if total_time_secs > 0.0 {
-                                total_tasks as f64 / total_time_secs
-                            } else {
-                                0.0
-                            };
-                            
-                            println!("=== Execution completed ===");
-                            println!("Total tasks processed: {}", total_tasks);
-                            println!("Total execution time: {:.2} seconds ({:.2} ms)", total_time_secs, total_time_ms);
-                            if total_tasks > 0 {
-                                println!("Average time per task: {:.2} ms", avg_time_ms);
-                            }
-                            println!("Throughput: {:.2} tasks/second", throughput);
-                            
-                            // Store metrics to file
-                            store_evaluation_metrics(total_tasks, total_time_secs, total_time_ms, avg_time_ms, throughput);
-                            
-                            // Reset timing for next execution
-                            *self.execution_start_time.lock().await = None;
-                            self.task_status.lock().await.clear();
-                            *self.completed_count.lock().await = 0;
-                        }
-                    }
-                }
+            task_status.insert(task_id, status);
+            *self.completed_count.lock().await += 1;
+        }
+
+        pub async fn calculate_average_response_time(&self) -> f64 {
+            let response_times = self.get_response_time_per_task();
+            let response_times_map = response_times.lock().unwrap();
+            if !response_times_map.is_empty() {
+                response_times_map.values().sum::<Duration>().as_millis() as f64 / response_times_map.len() as f64
+            } else {
+                0.0
+            }
+        }
+
+        async fn calculate_throughput(&self, completion_time: std::time::Instant, total_tasks: usize) -> f64 {
+            let total_time_secs = completion_time - self.get_execution_start_time().await.unwrap();
+            total_tasks as f64 / total_time_secs.as_secs_f64()
+        }
+
+        pub async fn on_task_completed(&self, task_id: String, completion_time: std::time::Instant) {
+            // Called by workers when a task completes (push notification)
+            self.set_task_status(task_id.clone(), 1).await;
+            let completed_tasks_count = *self.completed_count.lock().await;
+            let total_tasks = {
+                let task_status = self.task_status.lock().await;
+                task_status.len()
+            };
+            if completed_tasks_count>0 && completed_tasks_count == total_tasks {
+                let throughput = self.calculate_throughput(completion_time, total_tasks).await;
+                let average_response_time_millis = self.calculate_average_response_time().await;
+                let total_time_duration: Duration = completion_time - self.get_execution_start_time().await.unwrap();
+                println!("=== Execution completed ===");
+                println!("Total tasks processed: {}", completed_tasks_count);
+                println!("Total execution time: {:.2} seconds ({:.2} ms)", total_time_duration.as_secs(), total_time_duration.as_millis());
+                println!("Average response time per task: {:.2} ms", average_response_time_millis);
+                println!("Throughput: {:.2} tasks/second", throughput);
+                
+                // Store metrics to file
+                store_evaluation_metrics(completed_tasks_count, total_time_duration.as_secs_f64(), total_time_duration.as_millis() as f64, average_response_time_millis, throughput);
+                
+                // Reset timing for next execution
+                *self.execution_start_time.lock().await = None;
+                self.task_status.lock().await.clear();
+                *self.completed_count.lock().await = 0;
             }
         }
 
@@ -234,7 +235,6 @@ use crate::api::api_objects::{SubmittedJobs, Job};
                 worker.shutdown().await;
             }
         }
-
 
 
         // pub async fn execute_jobs_continuously(&mut self)->Result<(), Error>{

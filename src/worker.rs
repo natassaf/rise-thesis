@@ -1,4 +1,4 @@
-use std::usize;
+use std::{time::Duration, usize};
 use std::sync::Arc;
 use core_affinity::{CoreId};
 use serde_json::json;
@@ -184,7 +184,7 @@ impl Worker{
     //     ()
     // }
     
-    pub async fn run_wasm_job_component(core_id: CoreId, task_id: String, component_name:String, func_name:String, payload:String, shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>)->task::JoinHandle<(String, Result<Vec<Val>, anyhow::Error>)>{
+    pub async fn run_wasm_job_component(core_id: CoreId, task_id: String, component_name:String, func_name:String, payload:String, shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>, scheduler_ref: Arc<Mutex<Option<Arc<Mutex<crate::scheduler::SchedulerEngine>>>>>, start_time: std::time::Instant)->task::JoinHandle<(String, Result<Vec<Val>, anyhow::Error>)>{
         // Set up Wasmtime engine and module outside blocking
         // let component_name ="math_tasks".to_string();
         println!("Running component {:?}, func: {:?}", component_name, func_name);
@@ -212,6 +212,15 @@ impl Worker{
                 Err(e) => Self::store_result_uncompressed(&task_id, &format!("Error: {:?}", e)),
             }
             println!("Finished wasm task {}", task_id);
+            
+            // Set response time using scheduler's synchronous method
+            let end_time = std::time::Instant::now();
+            let response_time = end_time.duration_since(start_time);
+            rt.block_on(async {
+                if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
+                    scheduler.lock().await.set_response_time(task_id.clone(), response_time);
+                }
+            });
             
             // Return task_id along with result so we can notify scheduler
             (task_id, result)
@@ -262,17 +271,31 @@ impl Worker{
             let scheduler_ref = self.scheduler.clone();
             let core_id = self.core_id;
             
+            // Get start_time from scheduler
+            let start_time = {
+                let scheduler_opt = scheduler_ref.lock().await;
+                if let Some(scheduler) = scheduler_opt.as_ref() {
+                    scheduler.lock().await.get_execution_start_time().await
+                } else {
+                    return; // Scheduler not set yet
+                }
+            };
+            
+            // Use current time as fallback if start_time is None
+            let start_time = start_time.unwrap();
+            
             // Spawn I/O-bound task to run concurrently
             let handle = tokio::spawn(async move {
                 let handler = Worker::run_wasm_job_component(
-                    core_id, task_id.clone(), binary_path, func_name, payload, wasm_loader
+                    core_id, task_id.clone(), binary_path, func_name, payload, wasm_loader, scheduler_ref.clone(), start_time
                 ).await;
                 let completed_task_id = match handler.await {
                     Ok((task_id_result, _result)) => task_id_result,
                     Err(_) => task_id.clone(),
                 };
+                let completion_time = std::time::Instant::now();
                 if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
-                    scheduler.lock().await.on_task_completed(completed_task_id).await;
+                    scheduler.lock().await.on_task_completed(completed_task_id, completion_time).await;
                 }
             });
             handles.push(handle);
@@ -300,18 +323,24 @@ impl Worker{
                 }
                 
                 // Try to get one I/O-bound and one CPU-bound task
-                let io_task_opt = self.submitted_jobs.get_next_io_bounded_job().await;
-                let cpu_task_opt = self.submitted_jobs.get_next_cpu_bounded_job().await;
+                // let io_task_opt = self.submitted_jobs.get_next_io_bounded_job().await;
+                // let cpu_task_opt = self.submitted_jobs.get_next_cpu_bounded_job().await;
                 
                 // Check if we have any tasks
-                let has_io_task = io_task_opt.is_some();
-                let has_cpu_task = cpu_task_opt.is_some();
+                // let has_io_task = io_task_opt.is_some();
+                // let has_cpu_task = cpu_task_opt.is_some();
                 
                 // Process both tasks concurrently if available
                 let mut handles = Vec::new();
+                let task_opt = self.submitted_jobs.get_next_job().await;
                 
-                self.run_task_asynchronously(io_task_opt, &mut handles).await;
-                self.run_task_asynchronously(cpu_task_opt, &mut handles).await;
+                // If no task found, break the loop
+                if task_opt.is_none() {
+                    break;
+                }
+                
+                self.run_task_asynchronously(task_opt, &mut handles).await;
+                // self.run_task_asynchronously(cpu_task_opt, &mut handles).await;
                     
                 // Wait for all spawned tasks to complete
                 for handle in handles {
@@ -319,11 +348,11 @@ impl Worker{
                 }
                 
                 // If no tasks were found, check if queue is empty
-                if !has_io_task && !has_cpu_task {
-                    if self.submitted_jobs.get_num_tasks().await == 0 {
-                        break;
-                    }
-                }
+                // if !has_io_task && !has_cpu_task {
+                //     if self.submitted_jobs.get_num_tasks().await == 0 {
+                //         break;
+                //     }
+                // }
             }
         }
     }
