@@ -1,10 +1,10 @@
 use std::sync::{Arc, Mutex as StdMutex};
 use std::collections::HashMap;
 use std::time::Duration;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, mpsc};
 
 use actix_web::web;
-use tokio::{time::error::Error, task};
+use tokio::time::error::Error;
 use crate::{optimized_scheduling_preprocessing::scheduler_algorithms::{BaselineStaticSchedulerAlgorithm, MemoryTimeAwareSchedulerAlgorithm, SchedulerAlgorithm},worker::Worker};
 use core_affinity::*;
 use crate::api::api_objects::{SubmittedJobs, Job};
@@ -28,6 +28,9 @@ use crate::api::api_objects::{SubmittedJobs, Job};
     pub struct SchedulerEngine{
         submitted_jobs: web::Data<SubmittedJobs>,
         workers: Vec<Arc<Worker>>,
+        // Shared channels: all workers pull from these
+        io_bound_tx: mpsc::Sender<Job>, // Shared IO-bound channel sender
+        cpu_bound_tx: mpsc::Sender<Job>, // Shared CPU-bound channel sender
         execution_notify: Arc<Notify>, // Signal to workers to start processing
         task_status: Arc<Mutex<HashMap<String, u8>>>, // HashMap: task_id -> 0 (not processed) or 1 (processed)
         completed_count: Arc<Mutex<usize>>, // Counter for completed tasks
@@ -45,18 +48,36 @@ use crate::api::api_objects::{SubmittedJobs, Job};
             // Create a notification mechanism to signal workers when to process tasks
             let execution_notify = Arc::new(Notify::new());
             
+            // Create shared channels: one for IO-bound, one for CPU-bound tasks
+            // All workers will pull from these shared channels
+            let (io_bound_tx, io_bound_rx) = mpsc::channel::<Job>(10000); // Large buffer for many tasks
+            let (cpu_bound_tx, cpu_bound_rx) = mpsc::channel::<Job>(10000);
+            
+            // Wrap receivers in Arc<Mutex> so all workers can share them
+            let shared_io_rx = Arc::new(Mutex::new(io_bound_rx));
+            let shared_cpu_rx = Arc::new(Mutex::new(cpu_bound_rx));
+            
             // Create a single shared WasmComponentLoader instance wrapped in Arc<Mutex>
             // Mount the model_1 directory so ONNX models can be accessed
             let shared_wasm_loader = Arc::new(Mutex::new(crate::wasm_loaders::WasmComponentLoader::new("/home/pi/rise-thesis/models".to_string())));
             
-            // Create workers with the shared wasm_loader, reference to submitted_jobs, and execution_notify
+            // Create workers - all share the same channel receivers
             let workers: Vec<Arc<Worker>> = core_ids[0..num_workers_to_start].iter().map(|core_id| {
-                Arc::new(Worker::new(core_id.id, *core_id, shared_wasm_loader.clone(), submitted_jobs.clone(), execution_notify.clone()))
+                Arc::new(Worker::new(
+                    core_id.id, 
+                    *core_id, 
+                    shared_wasm_loader.clone(), 
+                    shared_io_rx.clone(),
+                    shared_cpu_rx.clone(),
+                    execution_notify.clone()
+                ))
             }).collect();
             
             SchedulerEngine{
                 submitted_jobs, 
-                workers, 
+                workers,
+                io_bound_tx,
+                cpu_bound_tx,
                 execution_notify,
                 task_status: Arc::new(Mutex::new(HashMap::new())),
                 completed_count: Arc::new(Mutex::new(0)),
@@ -72,7 +93,7 @@ use crate::api::api_objects::{SubmittedJobs, Job};
             self.execution_start_time.lock().await.clone()
         }
 
-        pub async fn start_scheduler(&mut self, scheduler_arc: Arc<Mutex<SchedulerEngine>>)-> Result<Vec<tokio::task::JoinHandle<()>>, Error>{
+        pub async fn start_scheduler(&mut self, scheduler_arc: Arc<Mutex<SchedulerEngine>>)-> Result<Vec<std::thread::JoinHandle<()>>, Error>{
             // Set scheduler reference in workers so they can notify on completion
             for worker in &self.workers {
                 worker.set_scheduler(scheduler_arc.clone()).await;
@@ -81,20 +102,25 @@ use crate::api::api_objects::{SubmittedJobs, Job};
             // Capture baseline value before the closure
             let pin_cores = self.pin_cores.clone();
             
-            let mut handlers:Vec<tokio::task::JoinHandle<()>> = vec![];
+            let mut handlers:Vec<std::thread::JoinHandle<()>> = vec![];
             // start all workers
             for worker in &self.workers {
                 let worker = worker.clone();
                 let pin_cores_clone = pin_cores.clone();
                 
                 // This blocks the thread and pins it to the core
-                let handler = task::spawn_blocking(move || {
+                let handler: std::thread::JoinHandle<()> = std::thread::spawn(move || {
                     
-                    // Pin to the correct core (unless baseline is "linux")
+                    // Pin worker thread to its assigned core
                     if pin_cores_clone{
-                        core_affinity::set_for_current(worker.core_id);
+                        let res = core_affinity::set_for_current(worker.core_id);
+                        if res {
+                            println!("Worker {} main thread pinned to core {}", worker.core_id.id, worker.core_id.id);
+                        } else {
+                            eprintln!("Failed to pin worker {} to core {}", worker.core_id.id, worker.core_id.id);
+                        }
                     }
-
+                    
                     // Create a local runtime just for this thread
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -164,7 +190,45 @@ use crate::api::api_objects::{SubmittedJobs, Job};
             
             println!("=== Execution started at {:?} with {} tasks ===", start_time, jobs.len());
             
-            // Notify all workers to start processing tasks (no sorting/predictions here)
+            // Distribute tasks to shared channels - workers will pull when free
+            let io_bound_ids = self.io_bound_task_ids.lock().await.clone();
+            let cpu_bound_ids = self.cpu_bound_task_ids.lock().await.clone();
+            
+            let mut io_count = 0;
+            let mut cpu_count = 0;
+            
+            for job in jobs.iter() {
+                let is_io_bound = io_bound_ids.contains(&job.id);
+                let is_cpu_bound = cpu_bound_ids.contains(&job.id);
+                
+                if is_io_bound {
+                    // Send to shared IO-bound channel - any free worker will pull it
+                    if let Err(e) = self.io_bound_tx.send(job.clone()).await {
+                        eprintln!("Failed to send IO-bound job to channel: {:?}", e);
+                    } else {
+                        io_count += 1;
+                    }
+                } else if is_cpu_bound {
+                    // Send to shared CPU-bound channel - any free worker will pull it
+                    if let Err(e) = self.cpu_bound_tx.send(job.clone()).await {
+                        eprintln!("Failed to send CPU-bound job to channel: {:?}", e);
+                    } else {
+                        cpu_count += 1;
+                    }
+                } else {
+                    // Default: send to IO-bound channel
+                    if let Err(e) = self.io_bound_tx.send(job.clone()).await {
+                        eprintln!("Failed to send job to channel: {:?}", e);
+                    } else {
+                        io_count += 1;
+                    }
+                }
+            }
+            
+            println!("=== Published {} tasks to channels ({} IO-bound, {} CPU-bound) ===", 
+                     jobs.len(), io_count, cpu_count);
+            
+            // Notify all workers to start processing tasks
             self.execution_notify.notify_waiters();
         }
 

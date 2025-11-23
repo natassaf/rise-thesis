@@ -1,12 +1,12 @@
-use std::{time::Duration, usize};
 use std::sync::Arc;
 use core_affinity::{CoreId};
 use serde_json::json;
-use tokio::{sync::{Mutex, Notify}, task};
-use crate::{api::api_objects::SubmittedJobs, scheduler::SchedulerEngine};
+use tokio::sync::{Mutex, Notify, mpsc};
+use crate::scheduler::SchedulerEngine;
 use crate::api::api_objects::Job;
 use crate::wasm_loaders::WasmComponentLoader;
 use wasmtime::component::Val;
+use std::collections::VecDeque;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use flate2::read::GzDecoder;
@@ -27,11 +27,14 @@ fn decompress_payload(compressed_base64: &str) -> Result<String, Box<dyn std::er
 }
 
 
-// Worker is mapped to a core id and runs the tasks from SubmittedJobs
+// Worker is mapped to a core id and pulls tasks from shared channels when free
 pub struct Worker{
     worker_id:usize,
     pub core_id:CoreId,
-    submitted_jobs: actix_web::web::Data<SubmittedJobs>, // Reference to submitted jobs
+    io_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, // Shared IO-bound task channel receiver
+    cpu_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, // Shared CPU-bound task channel receiver
+    local_io_queue: Arc<Mutex<VecDeque<Job>>>, // Local queue for IO-bound tasks
+    local_cpu_queue: Arc<Mutex<VecDeque<Job>>>, // Local queue for CPU-bound tasks
     shutdown_flag: Arc<Mutex<bool>>,
     wasm_loader: Arc<Mutex<WasmComponentLoader>>,
     execution_notify: Arc<Notify>, // Wait for signal to start processing
@@ -71,10 +74,21 @@ fn create_wasm_event_val_for_matrix() -> wasmtime::component::Val {
 }
 
 impl Worker{
-    pub fn new(worker_id:usize, core_id:CoreId, wasm_loader: Arc<Mutex<WasmComponentLoader>>, submitted_jobs: actix_web::web::Data<SubmittedJobs>, execution_notify: Arc<Notify>)->Self{
+    pub fn new(worker_id:usize, core_id:CoreId, wasm_loader: Arc<Mutex<WasmComponentLoader>>, io_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, cpu_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, execution_notify: Arc<Notify>)->Self{
         let shutdown_flag = Arc::new(Mutex::new(false));
         let scheduler = Arc::new(Mutex::new(None));
-        Worker{worker_id, core_id, submitted_jobs, shutdown_flag, wasm_loader, execution_notify, scheduler}
+        Worker{
+            worker_id, 
+            core_id, 
+            io_bound_rx,
+            cpu_bound_rx,
+            local_io_queue: Arc::new(Mutex::new(VecDeque::new())),
+            local_cpu_queue: Arc::new(Mutex::new(VecDeque::new())),
+            shutdown_flag, 
+            wasm_loader, 
+            execution_notify, 
+            scheduler
+        }
     }
 
     pub async fn set_scheduler(&self, scheduler: Arc<tokio::sync::Mutex<crate::scheduler::SchedulerEngine>>) {
@@ -184,51 +198,44 @@ impl Worker{
     //     ()
     // }
     
-    pub async fn run_wasm_job_component(core_id: CoreId, task_id: String, component_name:String, func_name:String, payload:String, shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>, scheduler_ref: Arc<Mutex<Option<Arc<Mutex<crate::scheduler::SchedulerEngine>>>>>, start_time: std::time::Instant)->task::JoinHandle<(String, Result<Vec<Val>, anyhow::Error>)>{
-        // Set up Wasmtime engine and module outside blocking
-        // let component_name ="math_tasks".to_string();
+    pub async fn run_wasm_job_component(
+        core_id: CoreId, 
+        task_id: String, 
+        component_name: String,
+        func_name: String, 
+        payload: String, 
+        shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>, 
+        scheduler_ref: Arc<Mutex<Option<Arc<Mutex<crate::scheduler::SchedulerEngine>>>>>, 
+        start_time: std::time::Instant
+    ) -> Result<(String, Result<Vec<Val>, anyhow::Error>), anyhow::Error> {
+        println!("Task {task_id} running on core {:?}", core_id);
         println!("Running component {:?}, func: {:?}", component_name, func_name);
         
-        // Use the shared wasm_loader instead of creating a new one
-        let func_to_run: wasmtime::component::Func = shared_wasm_loader.lock().await.load_func(component_name, func_name).await;
+        // Load function - runs on pinned thread
+        let func_to_run = shared_wasm_loader.lock().await.load_func(component_name, func_name).await;
         
-        let shared_wasm_loader_clone = shared_wasm_loader.clone();
-        let handler = task::spawn_blocking(move || {
-            println!{"Task {task_id} running on core {:?}", core_id.clone()};
-            core_affinity::set_for_current(core_id);
-            // Create a local runtime for async operations
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            
-            let input = vec![input_to_wasm_event_val(payload)];
-
-            let result: Result<Vec<Val>, anyhow::Error> = rt.block_on(async move {
-                shared_wasm_loader_clone.lock().await.run_func(input, func_to_run).await
-            });
-            match &result {
-                Ok(val) => Self::store_result_uncompressed(&task_id, &format!("{:?}", val)),
-                Err(e) => Self::store_result_uncompressed(&task_id, &format!("Error: {:?}", e)),
-            }
-            println!("Finished wasm task {}", task_id);
-            
-            // Set response time using scheduler's synchronous method
-            let end_time = std::time::Instant::now();
-            let response_time = end_time.duration_since(start_time);
-            rt.block_on(async {
-                if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
-                    scheduler.lock().await.set_response_time(task_id.clone(), response_time);
-                }
-            });
-            
-            // Return task_id along with result so we can notify scheduler
-            (task_id, result)
-        });
-        handler
+        // Prepare input
+        let input = vec![input_to_wasm_event_val(payload)];
+        
+        let result = shared_wasm_loader.lock().await.run_func(input, func_to_run).await;
+        
+        match &result {
+            Ok(val) => Self::store_result_uncompressed(&task_id, &format!("{:?}", val)),
+            Err(e) => Self::store_result_uncompressed(&task_id, &format!("Error: {:?}", e)),
+        }
+        println!("Finished wasm task {}", task_id);
+        
+        // Set response time
+        let end_time = std::time::Instant::now();
+        let response_time = end_time.duration_since(start_time);
+        if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
+            scheduler.lock().await.set_response_time(task_id.clone(), response_time);
+        }
+        
+        Ok((task_id, result))
     }
 
-    // pub async fn  run_job(&self, task_id:String, binary_path: String, func_name:String, payload:String, folder_to_mount:String){
+// pub async fn  run_job(&self, task_id:String, binary_path: String, func_name:String, payload:String, folder_to_mount:String){
     //     let core_id: CoreId = self.core_id.clone(); // clone cause we need to pass by value a copy on each thread and it is bound to self
     //     let task_module_path = binary_path;
     //     let scheduler_ref = self.scheduler.clone();
@@ -284,21 +291,75 @@ impl Worker{
             // Use current time as fallback if start_time is None
             let start_time = start_time.unwrap();
             
-            // Spawn I/O-bound task to run concurrently
-            let handle = tokio::spawn(async move {
-                let handler = Worker::run_wasm_job_component(
-                    core_id, task_id.clone(), binary_path, func_name, payload, wasm_loader, scheduler_ref.clone(), start_time
-                ).await;
-                let completed_task_id = match handler.await {
-                    Ok((task_id_result, _result)) => task_id_result,
-                    Err(_) => task_id.clone(),
-                };
-                let completion_time = std::time::Instant::now();
-                if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
-                    scheduler.lock().await.on_task_completed(completed_task_id, completion_time).await;
+            // Spawn task on a new thread pinned to the worker's core
+            // This allows multiple tasks to run concurrently on separate threads, all on the same core
+            let handle = tokio::task::spawn_blocking(move || {
+                // Pin this thread to the worker's core
+                if core_affinity::set_for_current(core_id) {
+                    println!("Task {} thread pinned to core {}", task_id, core_id.id);
+                } else {
+                    eprintln!("Failed to pin task {} thread to core {}", task_id, core_id.id);
                 }
+                
+                // Create a local runtime on this pinned thread
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create runtime for task");
+                
+                // Run the task on this pinned thread
+                rt.block_on(async move {
+                    let handler = Worker::run_wasm_job_component(
+                        core_id, task_id.clone(), binary_path, func_name, payload, wasm_loader, scheduler_ref.clone(), start_time
+                    ).await;
+                    let completed_task_id = match handler {
+                        Ok((task_id_result, _result)) => task_id_result,
+                        Err(_) => task_id.clone(),
+                    };
+                    let completion_time = std::time::Instant::now();
+                    if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
+                        scheduler.lock().await.on_task_completed(completed_task_id, completion_time).await;
+                    }
+                });
             });
             handles.push(handle);
+        }
+    }
+
+    // Receive tasks from channels and add to local queues
+    async fn receive_tasks(&self) {
+        // Receive IO-bound tasks (non-blocking)
+        loop {
+            let mut rx = self.io_bound_rx.lock().await;
+            match rx.try_recv() {
+                Ok(job) => {
+                    drop(rx);
+                    let mut queue = self.local_io_queue.lock().await;
+                    queue.push_back(job);
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    println!("Worker {}: IO-bound channel disconnected", self.worker_id);
+                    break;
+                }
+            }
+        }
+        
+        // Receive CPU-bound tasks (non-blocking)
+        loop {
+            let mut rx = self.cpu_bound_rx.lock().await;
+            match rx.try_recv() {
+                Ok(job) => {
+                    drop(rx);
+                    let mut queue = self.local_cpu_queue.lock().await;
+                    queue.push_back(job);
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    println!("Worker {}: CPU-bound channel disconnected", self.worker_id);
+                    break;
+                }
+            }
         }
     }
 
@@ -314,7 +375,9 @@ impl Worker{
             // Wait for signal to start processing (from execute_jobs endpoint)
             self.execution_notify.notified().await;
             
-            // Process all available tasks until queue is empty
+            println!("Worker {}: Starting to process tasks", self.worker_id);
+            
+            // Process all available tasks until queues are empty
             loop {
                 // Check for shutdown signal
                 if *self.shutdown_flag.lock().await {
@@ -322,37 +385,76 @@ impl Worker{
                     return;
                 }
                 
-                // Try to get one I/O-bound and one CPU-bound task
-                // let io_task_opt = self.submitted_jobs.get_next_io_bounded_job().await;
-                // let cpu_task_opt = self.submitted_jobs.get_next_cpu_bounded_job().await;
+                // Receive new tasks from channels into local queues
+                self.receive_tasks().await;
                 
-                // Check if we have any tasks
-                // let has_io_task = io_task_opt.is_some();
-                // let has_cpu_task = cpu_task_opt.is_some();
-                
-                // Process both tasks concurrently if available
+                // Process tasks from local queues - spawn multiple tasks concurrently
                 let mut handles = Vec::new();
-                let task_opt = self.submitted_jobs.get_next_job().await;
+                let mut has_tasks = false;
                 
-                // If no task found, break the loop
-                if task_opt.is_none() {
-                    break;
+                // Process multiple IO-bound tasks if available (up to some limit for concurrency)
+                {
+                    let mut io_queue = self.local_io_queue.lock().await;
+                    let mut tasks_to_process = Vec::new();
+                    // Take up to 2 tasks at a time for concurrent processing
+                    for _ in 0..2 {
+                        if let Some(task) = io_queue.pop_front() {
+                            tasks_to_process.push(task);
+                        } else {
+                            break;
+                        }
+                    }
+                    drop(io_queue);
+                    
+                    for task in tasks_to_process {
+                        self.run_task_asynchronously(Some(task), &mut handles).await;
+                        has_tasks = true;
+                    }
                 }
                 
-                self.run_task_asynchronously(task_opt, &mut handles).await;
-                // self.run_task_asynchronously(cpu_task_opt, &mut handles).await;
+                // Process multiple CPU-bound tasks if available
+                {
+                    let mut cpu_queue = self.local_cpu_queue.lock().await;
+                    let mut tasks_to_process = Vec::new();
+                    // Take up to 2 tasks at a time for concurrent processing
+                    for _ in 0..2 {
+                        if let Some(task) = cpu_queue.pop_front() {
+                            tasks_to_process.push(task);
+                        } else {
+                            break;
+                        }
+                    }
+                    drop(cpu_queue);
                     
+                    for task in tasks_to_process {
+                        self.run_task_asynchronously(Some(task), &mut handles).await;
+                        has_tasks = true;
+                    }
+                }
+                
                 // Wait for all spawned tasks to complete
                 for handle in handles {
                     let _ = handle.await;
                 }
                 
-                // If no tasks were found, check if queue is empty
-                // if !has_io_task && !has_cpu_task {
-                //     if self.submitted_jobs.get_num_tasks().await == 0 {
-                //         break;
-                //     }
-                // }
+                // If no tasks in queues and channels are empty, break
+                if !has_tasks {
+                    // Check if queues are empty
+                    let io_empty = self.local_io_queue.lock().await.is_empty();
+                    let cpu_empty = self.local_cpu_queue.lock().await.is_empty();
+                    
+                    if io_empty && cpu_empty {
+                        // Try one more receive to make sure channels are empty
+                        self.receive_tasks().await;
+                        let io_still_empty = self.local_io_queue.lock().await.is_empty();
+                        let cpu_still_empty = self.local_cpu_queue.lock().await.is_empty();
+                        
+                        if io_still_empty && cpu_still_empty {
+                            println!("Worker {}: All tasks processed, queues empty", self.worker_id);
+                            break;
+                        }
+                    }
+                }
             }
         }
     }

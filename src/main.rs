@@ -78,8 +78,8 @@ async fn main() -> std::io::Result<()> {
         scheduler_data
     };
     
-    let worker_handlers: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(vec![]));
-    let handlers_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>> = web::Data::new(worker_handlers.clone());
+    let worker_handlers: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(vec![]));
+    let handlers_data: web::Data<Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>> = web::Data::new(worker_handlers.clone());
 
     let scheduler_for_spawn = scheduler.clone();
     let worker_handlers_for_spawn = handlers_data.clone();
@@ -98,8 +98,8 @@ async fn main() -> std::io::Result<()> {
             }
         }
     });
-     let handlers_data: Data<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>> = { 
-        let h_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>> = web::Data::new(worker_handlers).clone(); 
+     let handlers_data: Data<Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>> = { 
+        let h_data: web::Data<Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>> = web::Data::new(worker_handlers).clone(); 
         h_data
     };
     
@@ -124,6 +124,7 @@ async fn main() -> std::io::Result<()> {
         app
     })
     .bind("[::]:8080")?
+    .workers(2)
     .shutdown_timeout(5) // 5 seconds timeout for graceful shutdown
     .run();
 

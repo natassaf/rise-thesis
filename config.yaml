@@ -1,4 +1,4 @@
 # Scheduler configuration
 pin_cores: true
-num_workers: 4
+num_workers: 1
 

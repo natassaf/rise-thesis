@@ -67,3 +67,24 @@ ldconfig -p | grep onnxruntime
 
 cargo build --release
 target/release/rise-thesis
+
+
+Implementation Summary
+1. Worker Thread Pinning (scheduler.rs)
+Each worker thread is pinned to its assigned core when spawned
+Uses core_affinity::set_for_current() on the worker's main thread
+2. Task Thread Pinning (worker.rs)
+When a task is spawned, it uses tokio::task::spawn_blocking() to create a new thread
+Each task thread is pinned to the worker's core before execution
+Multiple tasks can run concurrently on separate threads, all pinned to the same core
+3. Concurrent Task Processing
+Workers can process multiple tasks concurrently (up to 2 at a time per queue type)
+Each task runs on its own thread, but all threads are pinned to the worker's core
+How It Works
+Worker pinned: When a worker starts, its main thread is pinned to its assigned core
+Task spawning: When a worker receives tasks, it spawns them using spawn_blocking
+Task thread pinning: Each task thread pins itself to the worker's core before execution
+Concurrent execution: Multiple tasks can run on separate threads, all on the same core
+Example Flow
+All threads for a worker are pinned to the same core, allowing concurrent execution while maintaining core affinity.
+You can verify with htop (press H to show threads, then F2 → Display options → enable "Show custom thread names") - you should see all worker threads and task threads pinned to their respective cores.
