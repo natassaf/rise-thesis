@@ -4,6 +4,7 @@ mod worker;
 mod optimized_scheduling_preprocessing;
 mod wasm_loaders;
 mod api;
+mod evaluation_metrics;
 use std::{sync::Arc};
 use actix_web::web::Data;
 use tokio::sync::Mutex;
@@ -87,8 +88,7 @@ async fn main() -> std::io::Result<()> {
 
     // Store the scheduler handle so we can abort it on shutdown
     let scheduler_handle = tokio::spawn(async move {
-        let scheduler_arc = scheduler_for_spawn.get_ref().clone();
-        match scheduler_for_spawn.lock().await.start_scheduler(scheduler_arc).await {
+        match scheduler_for_spawn.lock().await.start_scheduler().await {
             Ok(handles) => {
                 let mut wh = worker_handlers_for_spawn.lock().await;
                 *wh = handles;

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use core_affinity::{CoreId};
 use serde_json::json;
 use tokio::sync::{Mutex, Notify, mpsc};
-use crate::scheduler::SchedulerEngine;
+use crate::evaluation_metrics::EvaluationMetrics;
 use crate::api::api_objects::Job;
 use crate::wasm_loaders::WasmComponentLoader;
 use wasmtime::component::Val;
@@ -38,7 +38,7 @@ pub struct Worker{
     shutdown_flag: Arc<Mutex<bool>>,
     wasm_loader: Arc<Mutex<WasmComponentLoader>>,
     execution_notify: Arc<Notify>, // Wait for signal to start processing
-    scheduler: Arc<Mutex<Option<Arc<Mutex<SchedulerEngine>>>>>, // Reference to scheduler for completion notification
+    evaluation_metrics: Arc<EvaluationMetrics>, // Reference to evaluation metrics
 }
 
 fn input_to_wasm_event_val(input:String) -> wasmtime::component::Val {
@@ -74,9 +74,8 @@ fn create_wasm_event_val_for_matrix() -> wasmtime::component::Val {
 }
 
 impl Worker{
-    pub fn new(worker_id:usize, core_id:CoreId, wasm_loader: Arc<Mutex<WasmComponentLoader>>, io_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, cpu_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, execution_notify: Arc<Notify>)->Self{
+    pub fn new(worker_id:usize, core_id:CoreId, wasm_loader: Arc<Mutex<WasmComponentLoader>>, io_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, cpu_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, execution_notify: Arc<Notify>, evaluation_metrics: Arc<EvaluationMetrics>)->Self{
         let shutdown_flag = Arc::new(Mutex::new(false));
-        let scheduler = Arc::new(Mutex::new(None));
         Worker{
             worker_id, 
             core_id, 
@@ -87,12 +86,8 @@ impl Worker{
             shutdown_flag, 
             wasm_loader, 
             execution_notify, 
-            scheduler
+            evaluation_metrics
         }
-    }
-
-    pub async fn set_scheduler(&self, scheduler: Arc<tokio::sync::Mutex<crate::scheduler::SchedulerEngine>>) {
-        *self.scheduler.lock().await = Some(scheduler);
     }
 
     pub async fn shutdown(&self) {
@@ -205,7 +200,7 @@ impl Worker{
         func_name: String, 
         payload: String, 
         shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>, 
-        scheduler_ref: Arc<Mutex<Option<Arc<Mutex<crate::scheduler::SchedulerEngine>>>>>, 
+        evaluation_metrics: Arc<EvaluationMetrics>, 
         start_time: std::time::Instant
     ) -> Result<(String, Result<Vec<Val>, anyhow::Error>), anyhow::Error> {
         println!("Task {task_id} running on core {:?}", core_id);
@@ -228,9 +223,7 @@ impl Worker{
         // Set response time
         let end_time = std::time::Instant::now();
         let response_time = end_time.duration_since(start_time);
-        if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
-            scheduler.lock().await.set_response_time(task_id.clone(), response_time);
-        }
+        evaluation_metrics.set_response_time(task_id.clone(), response_time);
         
         Ok((task_id, result))
     }
@@ -256,111 +249,136 @@ impl Worker{
     //     }
     // }
 
-    pub async fn run_task_asynchronously(&self, task: Option<Job>, handles:&mut Vec<tokio::task::JoinHandle<()>>){
-        // Spawn I/O-bound task if available
-        if let Some(my_task_1) = task {
-            let task_id = my_task_1.id.clone();
-            // Decompress payload if needed
-            let payload: String = if my_task_1.payload_compressed {
-                match decompress_payload(&my_task_1.payload) {
-                    Ok(decompressed) => decompressed,
-                    Err(e) => {
-                        eprintln!("Failed to decompress payload for task {}: {}", task_id, e);
-                        my_task_1.payload.clone()
-                    }
+    // Run a single task - this runs directly on the worker's runtime
+    // Each worker processes one task at a time, but multiple workers run in parallel
+    async fn run_task(&self, task: Job) {
+        let task_id = task.id.clone();
+        
+        // Decompress payload if needed
+        let payload: String = if task.payload_compressed {
+            match decompress_payload(&task.payload) {
+                Ok(decompressed) => decompressed,
+                Err(e) => {
+                    eprintln!("Failed to decompress payload for task {}: {}", task_id, e);
+                    task.payload.clone()
                 }
+            }
+        } else {
+            task.payload.clone()
+        };
+        
+        let func_name = task.func_name.clone();
+        let binary_path = task.binary_path.clone();
+        let wasm_loader = self.wasm_loader.clone();
+        let evaluation_metrics = self.evaluation_metrics.clone();
+        let core_id = self.core_id;
+        
+        // Get start_time from evaluation metrics
+        let start_time = evaluation_metrics.get_execution_start_time();
+        if start_time.is_none() {
+            eprintln!("Worker {}: Execution not started yet, skipping task {}", self.worker_id, task_id);
+            return;
+        }
+        let start_time = start_time.unwrap();
+        
+        // Run the task directly on this worker's runtime (which is pinned to the core)
+        // This allows multiple workers to run tasks in parallel
+        let handler = Worker::run_wasm_job_component(
+            core_id, 
+            task_id.clone(), 
+            binary_path, 
+            func_name, 
+            payload, 
+            wasm_loader, 
+            evaluation_metrics.clone(), 
+            start_time
+        ).await;
+        
+        let completed_task_id = match handler {
+            Ok((task_id_result, _result)) => task_id_result,
+            Err(_) => task_id.clone(),
+        };
+        
+        let completion_time = std::time::Instant::now();
+        evaluation_metrics.set_task_status(completed_task_id.clone(), 1).await;
+        
+        // Check if all tasks are completed
+        let completed_count = evaluation_metrics.get_completed_count().await;
+        let total_tasks = evaluation_metrics.get_total_tasks().await;
+        
+        if completed_count > 0 && completed_count == total_tasks {
+            let throughput = evaluation_metrics.calculate_throughput(completion_time, total_tasks).await;
+            let average_response_time_millis = evaluation_metrics.calculate_average_response_time().await;
+            let total_time_duration = if let Some(start) = evaluation_metrics.get_execution_start_time() {
+                completion_time.duration_since(start)
             } else {
-                my_task_1.payload.clone()
-            };
-            let func_name = my_task_1.func_name.clone();
-            let binary_path = my_task_1.binary_path.clone();
-            let wasm_loader = self.wasm_loader.clone();
-            let scheduler_ref = self.scheduler.clone();
-            let core_id = self.core_id;
-            
-            // Get start_time from scheduler
-            let start_time = {
-                let scheduler_opt = scheduler_ref.lock().await;
-                if let Some(scheduler) = scheduler_opt.as_ref() {
-                    scheduler.lock().await.get_execution_start_time().await
-                } else {
-                    return; // Scheduler not set yet
-                }
+                std::time::Duration::from_secs(0)
             };
             
-            // Use current time as fallback if start_time is None
-            let start_time = start_time.unwrap();
+            println!("=== Execution completed ===");
+            println!("Total tasks processed: {}", completed_count);
+            println!("Total execution time: {:.2} seconds ({:.2} ms)", total_time_duration.as_secs(), total_time_duration.as_millis());
+            println!("Average response time per task: {:.2} ms", average_response_time_millis);
+            println!("Throughput: {:.2} tasks/second", throughput);
             
-            // Spawn task on a new thread pinned to the worker's core
-            // This allows multiple tasks to run concurrently on separate threads, all on the same core
-            let handle = tokio::task::spawn_blocking(move || {
-                // Pin this thread to the worker's core
-                if core_affinity::set_for_current(core_id) {
-                    println!("Task {} thread pinned to core {}", task_id, core_id.id);
-                } else {
-                    eprintln!("Failed to pin task {} thread to core {}", task_id, core_id.id);
-                }
-                
-                // Create a local runtime on this pinned thread
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("Failed to create runtime for task");
-                
-                // Run the task on this pinned thread
-                rt.block_on(async move {
-                    let handler = Worker::run_wasm_job_component(
-                        core_id, task_id.clone(), binary_path, func_name, payload, wasm_loader, scheduler_ref.clone(), start_time
-                    ).await;
-                    let completed_task_id = match handler {
-                        Ok((task_id_result, _result)) => task_id_result,
-                        Err(_) => task_id.clone(),
-                    };
-                    let completion_time = std::time::Instant::now();
-                    if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
-                        scheduler.lock().await.on_task_completed(completed_task_id, completion_time).await;
-                    }
-                });
-            });
-            handles.push(handle);
+            // Store metrics to file
+            crate::evaluation_metrics::store_evaluation_metrics(
+                completed_count,
+                total_time_duration.as_secs_f64(),
+                total_time_duration.as_millis() as f64,
+                average_response_time_millis,
+                throughput
+            );
+            
+            // Reset timing for next execution
+            evaluation_metrics.reset().await;
         }
     }
 
     // Receive tasks from channels and add to local queues
-    async fn receive_tasks(&self) {
-        // Receive IO-bound tasks (non-blocking)
-        loop {
+    // Returns true if any tasks were received, false otherwise
+    // Uses a work-stealing approach: try to get one task at a time to ensure fair distribution
+    async fn receive_tasks(&self) -> bool {
+        let mut received_any = false;
+        
+        // Try to receive ONE task from IO-bound channel (fair distribution)
+        // Only take one at a time to prevent one worker from grabbing all tasks
+        {
             let mut rx = self.io_bound_rx.lock().await;
             match rx.try_recv() {
                 Ok(job) => {
                     drop(rx);
                     let mut queue = self.local_io_queue.lock().await;
                     queue.push_back(job);
+                    received_any = true;
+                    // Only take one task to allow other workers a chance
+                    return received_any;
                 }
-                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Empty) => {},
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     println!("Worker {}: IO-bound channel disconnected", self.worker_id);
-                    break;
                 }
             }
         }
         
-        // Receive CPU-bound tasks (non-blocking)
-        loop {
+        // Try to receive ONE task from CPU-bound channel (fair distribution)
+        {
             let mut rx = self.cpu_bound_rx.lock().await;
             match rx.try_recv() {
                 Ok(job) => {
                     drop(rx);
                     let mut queue = self.local_cpu_queue.lock().await;
                     queue.push_back(job);
+                    received_any = true;
                 }
-                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Empty) => {},
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     println!("Worker {}: CPU-bound channel disconnected", self.worker_id);
-                    break;
                 }
             }
         }
+        
+        received_any
     }
 
     pub async fn start(&self){
@@ -377,7 +395,8 @@ impl Worker{
             
             println!("Worker {}: Starting to process tasks", self.worker_id);
             
-            // Process all available tasks until queues are empty
+            // Process tasks one at a time - each worker processes one task at a time
+            // Multiple workers run in parallel (one task per worker)
             loop {
                 // Check for shutdown signal
                 if *self.shutdown_flag.lock().await {
@@ -385,74 +404,46 @@ impl Worker{
                     return;
                 }
                 
-                // Receive new tasks from channels into local queues
-                self.receive_tasks().await;
-                
-                // Process tasks from local queues - spawn multiple tasks concurrently
-                let mut handles = Vec::new();
-                let mut has_tasks = false;
-                
-                // Process multiple IO-bound tasks if available (up to some limit for concurrency)
-                {
+                // Get one task to process (prefer IO-bound, then CPU-bound)
+                let task_to_process = {
                     let mut io_queue = self.local_io_queue.lock().await;
-                    let mut tasks_to_process = Vec::new();
-                    // Take up to 2 tasks at a time for concurrent processing
-                    for _ in 0..2 {
-                        if let Some(task) = io_queue.pop_front() {
-                            tasks_to_process.push(task);
-                        } else {
-                            break;
-                        }
+                    if let Some(task) = io_queue.pop_front() {
+                        Some(task)
+                    } else {
+                        drop(io_queue);
+                        let mut cpu_queue = self.local_cpu_queue.lock().await;
+                        cpu_queue.pop_front()
                     }
-                    drop(io_queue);
-                    
-                    for task in tasks_to_process {
-                        self.run_task_asynchronously(Some(task), &mut handles).await;
-                        has_tasks = true;
-                    }
-                }
+                };
                 
-                // Process multiple CPU-bound tasks if available
-                {
-                    let mut cpu_queue = self.local_cpu_queue.lock().await;
-                    let mut tasks_to_process = Vec::new();
-                    // Take up to 2 tasks at a time for concurrent processing
-                    for _ in 0..2 {
-                        if let Some(task) = cpu_queue.pop_front() {
-                            tasks_to_process.push(task);
-                        } else {
-                            break;
-                        }
-                    }
-                    drop(cpu_queue);
+                if let Some(task) = task_to_process {
+                    // Process the task
+                    self.run_task(task).await;
                     
-                    for task in tasks_to_process {
-                        self.run_task_asynchronously(Some(task), &mut handles).await;
-                        has_tasks = true;
-                    }
-                }
-                
-                // Wait for all spawned tasks to complete
-                for handle in handles {
-                    let _ = handle.await;
-                }
-                
-                // If no tasks in queues and channels are empty, break
-                if !has_tasks {
-                    // Check if queues are empty
-                    let io_empty = self.local_io_queue.lock().await.is_empty();
-                    let cpu_empty = self.local_cpu_queue.lock().await.is_empty();
+                    // After processing, try to receive ONE more task from channels
+                    // Taking only one ensures fair distribution among workers
+                    self.receive_tasks().await;
+                } else {
+                    // No tasks in local queues - try to receive from channels
+                    let received = self.receive_tasks().await;
                     
-                    if io_empty && cpu_empty {
-                        // Try one more receive to make sure channels are empty
-                        self.receive_tasks().await;
-                        let io_still_empty = self.local_io_queue.lock().await.is_empty();
-                        let cpu_still_empty = self.local_cpu_queue.lock().await.is_empty();
+                    if !received {
+                        // No tasks received from channels - check if all tasks are actually done
+                        // by checking evaluation metrics
+                        let completed_count = self.evaluation_metrics.get_completed_count().await;
+                        let total_tasks = self.evaluation_metrics.get_total_tasks().await;
                         
-                        if io_still_empty && cpu_still_empty {
-                            println!("Worker {}: All tasks processed, queues empty", self.worker_id);
+                        // If we've completed all tasks, we're done
+                        if total_tasks > 0 && completed_count >= total_tasks {
+                            println!("Worker {}: All {} tasks completed, exiting", self.worker_id, total_tasks);
                             break;
                         }
+                        
+                        // Not all tasks completed yet - keep trying with a small delay
+                        // This handles race conditions where tasks are still being processed
+                        // by other workers or are in transit through channels
+                        // Use a slightly longer delay to reduce mutex contention
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                     }
                 }
             }

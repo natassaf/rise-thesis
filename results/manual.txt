@@ -1,52 +1,22 @@
-## One task per worker, pinned
-
-
-Total tasks processed: 125
-Total execution time: 85 seconds (85023 ms)
-Average response time per task: 53914.28 ms
-Throughput: 1.47 tasks/second
-
-=== Execution completed ===
-Total tasks processed: 125
-Total execution time: 87 seconds (87100 ms)
-Average response time per task: 55309.10 ms
-Throughput: 1.44 tasks/second
-
-****** Run 1 ******
 === Execution completed ===
 Total tasks processed: 150
-Total execution time: 242 seconds (242733 ms)
-Average response time per task: 181035.69 ms
-Throughput: 0.62 tasks/second
-
-****** Run 2 ******
-Total tasks processed: 150
-Total execution time: 241 seconds (241863 ms)
-Average response time per task: 180553.69 ms
-Throughput: 0.62 tasks/second
-
-****** Run 3 ******
-=== Execution completed ===
-Total tasks processed: 150
-Total execution time: 244 seconds (244212 ms)
-Average response time per task: 181871.23 ms
+Total execution time: 244 seconds (244028 ms)
+Average response time per task: 138736.01 ms
 Throughput: 0.61 tasks/second
-
-****** Run 4 ******
-
-****** Run 5 ******
-#############################################################################
-
-****** Run 1 ******
-## Two tasks per core, pinned
-
-
-
-
+Evaluation metrics written to results/evaluation_metrics.txt
 
 === Execution completed ===
 Total tasks processed: 150
-Total execution time: 257 seconds (257780 ms)
-Average response time per task: 188942.22 ms
-Throughput: 0.58 tasks/second
-Evaluation metrics written to results/evaluation_metrics.txt
+Total execution time: 171 seconds (171349 ms)
+Average response time per task: 68015.15 ms
+Throughput: 0.88 tasks/second
+
+Finished wasm task test_case_matmul11
+=== Execution completed ===
+Total tasks processed: 150
+Total execution time: 154 seconds (154101 ms)
+Average response time per task: 66309.02 ms
+Throughput: 0.97 tasks/second
+Worker 2: All 150 tasks completed, exiting
+Worker 0: All 150 tasks completed, exiting
+Worker 1: All 150 tasks completed, exiting

@@ -1,6 +1,4 @@
-use std::sync::{Arc, Mutex as StdMutex};
-use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use actix_web::web;
@@ -8,21 +6,7 @@ use tokio::time::error::Error;
 use crate::{optimized_scheduling_preprocessing::scheduler_algorithms::{BaselineStaticSchedulerAlgorithm, MemoryTimeAwareSchedulerAlgorithm, SchedulerAlgorithm},worker::Worker};
 use core_affinity::*;
 use crate::api::api_objects::{SubmittedJobs, Job};
-
-
-    // Standalone function to store evaluation metrics to file
-    fn store_evaluation_metrics(total_tasks: usize, total_time_secs: f64, total_time_ms: f64, avg_time_ms: f64, throughput: f64) {
-        let metrics_content = format!(
-            "Total tasks processed: {}\nTotal execution time: {:.2} seconds ({:.2} ms)\nAverage time per task: {:.2} ms\nThroughput: {:.2} tasks/second\n",
-            total_tasks, total_time_secs, total_time_ms, avg_time_ms, throughput
-        );
-        
-        if let Err(e) = std::fs::write("results/evaluation_metrics.txt", metrics_content) {
-            eprintln!("Failed to write evaluation metrics to file: {}", e);
-        } else {
-            println!("Evaluation metrics written to results/evaluation_metrics.txt");
-        }
-    }
+use crate::evaluation_metrics::EvaluationMetrics;
 
     // ========== SCHEDULER ==========
     pub struct SchedulerEngine{
@@ -32,13 +16,10 @@ use crate::api::api_objects::{SubmittedJobs, Job};
         io_bound_tx: mpsc::Sender<Job>, // Shared IO-bound channel sender
         cpu_bound_tx: mpsc::Sender<Job>, // Shared CPU-bound channel sender
         execution_notify: Arc<Notify>, // Signal to workers to start processing
-        task_status: Arc<Mutex<HashMap<String, u8>>>, // HashMap: task_id -> 0 (not processed) or 1 (processed)
-        completed_count: Arc<Mutex<usize>>, // Counter for completed tasks
-        execution_start_time: Arc<Mutex<Option<std::time::Instant>>>, // Track when execution starts
+        evaluation_metrics: Arc<EvaluationMetrics>, // Evaluation metrics storage
         pin_cores: bool,
         cpu_bound_task_ids: Arc<Mutex<Vec<String>>>, // CPU-bound task IDs
         io_bound_task_ids: Arc<Mutex<Vec<String>>>,  // I/O-bound task IDs
-        response_time_per_task: Arc<StdMutex<HashMap<String, Duration>>>, // Track response time for each task
     }
 
     impl SchedulerEngine{
@@ -47,6 +28,9 @@ use crate::api::api_objects::{SubmittedJobs, Job};
             
             // Create a notification mechanism to signal workers when to process tasks
             let execution_notify = Arc::new(Notify::new());
+            
+            // Create shared evaluation metrics
+            let evaluation_metrics = Arc::new(EvaluationMetrics::new());
             
             // Create shared channels: one for IO-bound, one for CPU-bound tasks
             // All workers will pull from these shared channels
@@ -57,19 +41,21 @@ use crate::api::api_objects::{SubmittedJobs, Job};
             let shared_io_rx = Arc::new(Mutex::new(io_bound_rx));
             let shared_cpu_rx = Arc::new(Mutex::new(cpu_bound_rx));
             
-            // Create a single shared WasmComponentLoader instance wrapped in Arc<Mutex>
+            // Create workers - each worker gets its own WasmComponentLoader instance
+            // This allows parallel execution without mutex contention
             // Mount the model_1 directory so ONNX models can be accessed
-            let shared_wasm_loader = Arc::new(Mutex::new(crate::wasm_loaders::WasmComponentLoader::new("/home/pi/rise-thesis/models".to_string())));
-            
-            // Create workers - all share the same channel receivers
             let workers: Vec<Arc<Worker>> = core_ids[0..num_workers_to_start].iter().map(|core_id| {
+                // Each worker gets its own WasmComponentLoader instance
+                let worker_wasm_loader = Arc::new(Mutex::new(crate::wasm_loaders::WasmComponentLoader::new("/home/pi/rise-thesis/models".to_string())));
+                
                 Arc::new(Worker::new(
                     core_id.id, 
                     *core_id, 
-                    shared_wasm_loader.clone(), 
+                    worker_wasm_loader, 
                     shared_io_rx.clone(),
                     shared_cpu_rx.clone(),
-                    execution_notify.clone()
+                    execution_notify.clone(),
+                    evaluation_metrics.clone()
                 ))
             }).collect();
             
@@ -79,26 +65,14 @@ use crate::api::api_objects::{SubmittedJobs, Job};
                 io_bound_tx,
                 cpu_bound_tx,
                 execution_notify,
-                task_status: Arc::new(Mutex::new(HashMap::new())),
-                completed_count: Arc::new(Mutex::new(0)),
-                execution_start_time: Arc::new(Mutex::new(None)),
-                response_time_per_task: Arc::new(StdMutex::new(HashMap::new())),
+                evaluation_metrics,
                 pin_cores,
                 cpu_bound_task_ids: Arc::new(Mutex::new(Vec::new())),
                 io_bound_task_ids: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
-        pub async fn get_execution_start_time(&self) -> Option<std::time::Instant> {
-            self.execution_start_time.lock().await.clone()
-        }
-
-        pub async fn start_scheduler(&mut self, scheduler_arc: Arc<Mutex<SchedulerEngine>>)-> Result<Vec<std::thread::JoinHandle<()>>, Error>{
-            // Set scheduler reference in workers so they can notify on completion
-            for worker in &self.workers {
-                worker.set_scheduler(scheduler_arc.clone()).await;
-            }
-            
+        pub async fn start_scheduler(&mut self)-> Result<Vec<std::thread::JoinHandle<()>>, Error>{
             // Capture baseline value before the closure
             let pin_cores = self.pin_cores.clone();
             
@@ -138,16 +112,6 @@ use crate::api::api_objects::{SubmittedJobs, Job};
             Ok(handlers)
             // self.execute_jobs_continuously().await;
         }
-
-        async fn initialize_task_status(&mut self, jobs:&Vec<Job>){
-            let mut task_status = self.task_status.lock().await;
-            task_status.clear();
-            for job in jobs.iter() {
-                task_status.insert(job.id.clone(), 0); // 0 = not processed
-            }
-            drop(task_status);
-
-        }
         pub async fn predict_and_sort(&mut self, scheduling_algorithm: String){
             // Create the appropriate scheduler algorithm based on the request
             let scheduler_algo: Box<dyn SchedulerAlgorithm> = match scheduling_algorithm.as_str() {
@@ -178,15 +142,14 @@ use crate::api::api_objects::{SubmittedJobs, Job};
         pub async fn execute_jobs(&mut self){
             // Record start time
             let start_time = std::time::Instant::now();
-            *self.execution_start_time.lock().await = Some(start_time);
+            self.evaluation_metrics.set_execution_start_time(start_time);
             
             // Get all current tasks and initialize HashMap (all set to 0 = not processed)
             let jobs = self.submitted_jobs.get_jobs().await;
 
-            self.initialize_task_status(&jobs).await;
-
-            // Initialize completed counter
-            *self.completed_count.lock().await = 0;
+            // Initialize task status in evaluation metrics
+            let task_ids: Vec<String> = jobs.iter().map(|j| j.id.clone()).collect();
+            self.evaluation_metrics.initialize_task_status(task_ids).await;
             
             println!("=== Execution started at {:?} with {} tasks ===", start_time, jobs.len());
             
@@ -232,65 +195,6 @@ use crate::api::api_objects::{SubmittedJobs, Job};
             self.execution_notify.notify_waiters();
         }
 
-        // Get response_time_per_task Arc (for passing to workers)
-        pub fn get_response_time_per_task(&self) -> Arc<StdMutex<HashMap<String, Duration>>> {
-            self.response_time_per_task.clone()
-        }
-
-        // Synchronous method to set response time for a task (can be called from blocking context)
-        pub fn set_response_time(&self, task_id: String, response_time: Duration) {
-            let mut response_times = self.response_time_per_task.lock().unwrap();
-            response_times.insert(task_id, response_time);
-        }
-
-        async fn set_task_status(&self, task_id: String, status: u8){
-            let mut task_status = self.task_status.lock().await;
-            task_status.insert(task_id, status);
-            *self.completed_count.lock().await += 1;
-        }
-
-        pub async fn calculate_average_response_time(&self) -> f64 {
-            let response_times = self.get_response_time_per_task();
-            let response_times_map = response_times.lock().unwrap();
-            if !response_times_map.is_empty() {
-                response_times_map.values().sum::<Duration>().as_millis() as f64 / response_times_map.len() as f64
-            } else {
-                0.0
-            }
-        }
-
-        async fn calculate_throughput(&self, completion_time: std::time::Instant, total_tasks: usize) -> f64 {
-            let total_time_secs = completion_time - self.get_execution_start_time().await.unwrap();
-            total_tasks as f64 / total_time_secs.as_secs_f64()
-        }
-
-        pub async fn on_task_completed(&self, task_id: String, completion_time: std::time::Instant) {
-            // Called by workers when a task completes (push notification)
-            self.set_task_status(task_id.clone(), 1).await;
-            let completed_tasks_count = *self.completed_count.lock().await;
-            let total_tasks = {
-                let task_status = self.task_status.lock().await;
-                task_status.len()
-            };
-            if completed_tasks_count>0 && completed_tasks_count == total_tasks {
-                let throughput = self.calculate_throughput(completion_time, total_tasks).await;
-                let average_response_time_millis = self.calculate_average_response_time().await;
-                let total_time_duration: Duration = completion_time - self.get_execution_start_time().await.unwrap();
-                println!("=== Execution completed ===");
-                println!("Total tasks processed: {}", completed_tasks_count);
-                println!("Total execution time: {:.2} seconds ({:.2} ms)", total_time_duration.as_secs(), total_time_duration.as_millis());
-                println!("Average response time per task: {:.2} ms", average_response_time_millis);
-                println!("Throughput: {:.2} tasks/second", throughput);
-                
-                // Store metrics to file
-                store_evaluation_metrics(completed_tasks_count, total_time_duration.as_secs_f64(), total_time_duration.as_millis() as f64, average_response_time_millis, throughput);
-                
-                // Reset timing for next execution
-                *self.execution_start_time.lock().await = None;
-                self.task_status.lock().await.clear();
-                *self.completed_count.lock().await = 0;
-            }
-        }
 
 
         pub async fn shutdown(&mut self) {
