@@ -24,7 +24,7 @@ use crate::evaluation_metrics::EvaluationMetrics;
 
     impl SchedulerEngine{
 
-        pub fn new(core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>,  num_workers_to_start: usize, pin_cores: bool)->Self{
+        pub fn new(core_ids: Vec<CoreId>, submitted_jobs: web::Data<SubmittedJobs>,  num_workers_to_start: usize, pin_cores: bool, num_concurrent_tasks: usize)->Self{
             
             // Create a notification mechanism to signal workers when to process tasks
             let execution_notify = Arc::new(Notify::new());
@@ -55,7 +55,8 @@ use crate::evaluation_metrics::EvaluationMetrics;
                     shared_io_rx.clone(),
                     shared_cpu_rx.clone(),
                     execution_notify.clone(),
-                    evaluation_metrics.clone()
+                    evaluation_metrics.clone(),
+                    num_concurrent_tasks
                 ))
             }).collect();
             

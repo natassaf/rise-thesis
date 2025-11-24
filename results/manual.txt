@@ -1,22 +1,6 @@
 === Execution completed ===
-Total tasks processed: 150
-Total execution time: 244 seconds (244028 ms)
-Average response time per task: 138736.01 ms
-Throughput: 0.61 tasks/second
+Total tasks processed: 75
+Total execution time: 7 seconds (7121 ms)
+Average response time per task: 3664.76 ms
+Throughput: 10.53 tasks/second
 Evaluation metrics written to results/evaluation_metrics.txt
-
-=== Execution completed ===
-Total tasks processed: 150
-Total execution time: 171 seconds (171349 ms)
-Average response time per task: 68015.15 ms
-Throughput: 0.88 tasks/second
-
-Finished wasm task test_case_matmul11
-=== Execution completed ===
-Total tasks processed: 150
-Total execution time: 154 seconds (154101 ms)
-Average response time per task: 66309.02 ms
-Throughput: 0.97 tasks/second
-Worker 2: All 150 tasks completed, exiting
-Worker 0: All 150 tasks completed, exiting
-Worker 1: All 150 tasks completed, exiting

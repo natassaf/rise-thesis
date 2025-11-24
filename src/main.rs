@@ -22,7 +22,8 @@ use crate::api::api_handlers::{handle_submit_task, handle_get_result, handle_pre
 #[derive(Debug, Deserialize)]
 struct Config {
     pin_cores: bool,
-    num_workers: usize
+    num_workers: usize,
+    num_concurrent_tasks: Option<usize>, // Optional, defaults to 1 if not specified
 }
 
 
@@ -37,6 +38,7 @@ fn load_config() -> Config {
                     Config {
                         pin_cores: false,
                         num_workers: 2,
+                        num_concurrent_tasks: Some(1),
                     }
                 }
             }
@@ -46,6 +48,7 @@ fn load_config() -> Config {
             Config {
                 pin_cores: false,
                 num_workers: 2,
+                num_concurrent_tasks: Some(1),
             }
         }
     }
@@ -61,7 +64,8 @@ async fn main() -> std::io::Result<()> {
     let config = load_config();
     let pin_cores = config.pin_cores;
     let num_workers_to_start = config.num_workers;
-    println!("pin_cores: {}, num_workers: {}", pin_cores, num_workers_to_start);
+    let num_concurrent_tasks = config.num_concurrent_tasks.unwrap_or(1);
+    println!("pin_cores: {}, num_workers: {}, num_concurrent_tasks: {}", pin_cores, num_workers_to_start, num_concurrent_tasks);
 
     // Global shutdown flag
     static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
@@ -75,7 +79,7 @@ async fn main() -> std::io::Result<()> {
     // Wrapped arouns Arc so that we keep one instance in the Heap and when doing .clone we only clone pointers
     // Mutex is needed cause some instance fields are mutable across threads
     let scheduler = { 
-        let scheduler = Arc::new( Mutex::new(SchedulerEngine::new(core_ids, jobs_log.clone(), num_workers_to_start, pin_cores)));
+        let scheduler = Arc::new( Mutex::new(SchedulerEngine::new(core_ids, jobs_log.clone(), num_workers_to_start, pin_cores, num_concurrent_tasks)));
         let scheduler_data: web::Data<Arc<Mutex<SchedulerEngine>>> = web::Data::new(scheduler.clone()); 
         scheduler_data
     };

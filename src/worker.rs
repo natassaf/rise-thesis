@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use core_affinity::{CoreId};
-use serde_json::json;
 use tokio::sync::{Mutex, Notify, mpsc};
 use crate::evaluation_metrics::EvaluationMetrics;
 use crate::api::api_objects::Job;
@@ -37,6 +36,7 @@ pub struct Worker{
     wasm_loader: Arc<Mutex<WasmComponentLoader>>,
     execution_notify: Arc<Notify>, // Wait for signal to start processing
     evaluation_metrics: Arc<EvaluationMetrics>, // Reference to evaluation metrics
+    num_concurrent_tasks: usize,
 }
 
 fn input_to_wasm_event_val(input:String) -> wasmtime::component::Val {
@@ -48,7 +48,7 @@ fn input_to_wasm_event_val(input:String) -> wasmtime::component::Val {
 }
 
 impl Worker{
-    pub fn new(worker_id:usize, core_id:CoreId, wasm_loader: Arc<Mutex<WasmComponentLoader>>, io_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, cpu_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, execution_notify: Arc<Notify>, evaluation_metrics: Arc<EvaluationMetrics>)->Self{
+    pub fn new(worker_id:usize, core_id:CoreId, wasm_loader: Arc<Mutex<WasmComponentLoader>>, io_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, cpu_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, execution_notify: Arc<Notify>, evaluation_metrics: Arc<EvaluationMetrics>, num_concurrent_tasks: usize)->Self{
         let shutdown_flag = Arc::new(Mutex::new(false));
         Worker{
             worker_id, 
@@ -58,7 +58,8 @@ impl Worker{
             shutdown_flag, 
             wasm_loader, 
             execution_notify, 
-            evaluation_metrics
+            evaluation_metrics,
+            num_concurrent_tasks,
         }
     }
 
@@ -304,35 +305,44 @@ impl Worker{
                     println!("Worker: {:?} shutting down", self.worker_id);
                     return;
                 }
-                // Get tasks from local queues
-                let task_to_process_1 = Self::get_task_from_local_queue(&mut local_io_queue).await;
-                let task_to_process_2 = Self::get_task_from_local_queue(&mut local_cpu_queue).await;
                 
-                // Process tasks
-                match (task_to_process_1, task_to_process_2) {
-                    (Some(task_1), Some(task_2)) => {
-                        self.run_task(task_1).await;
-                        self.run_task(task_2).await;
+                // Collect tasks from local queues
+                let mut tasks_to_process = Vec::new();
+                
+                // Collect up to num_concurrent_tasks (or 1 if sequential)
+                let max_tasks = if self.num_concurrent_tasks == 1 { 1 } else { self.num_concurrent_tasks };
+                
+                if let Some(task) = Self::get_task_from_local_queue(&mut local_io_queue).await {
+                    tasks_to_process.push(task);
+                }
+                if tasks_to_process.len() < max_tasks {
+                    if let Some(task) = Self::get_task_from_local_queue(&mut local_cpu_queue).await {
+                        tasks_to_process.push(task);
                     }
-                    (Some(task_1), None) => {
-                        self.run_task(task_1).await;
+                }
+                
+                // Process tasks or fetch more from channels
+                if tasks_to_process.is_empty() {
+                    let received = self.receive_tasks(&mut local_io_queue, &mut local_cpu_queue).await;
+                    if !received && self.evaluation_metrics.are_all_tasks_completed().await {
+                        println!("Worker {}: All {} tasks completed, exiting", self.worker_id, self.evaluation_metrics.get_total_tasks().await);
+                        break;
                     }
-                    (None, Some(task_2)) => {
-                        self.run_task(task_2).await;
+                    if !received {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                     }
-                    (None, None) => {
-                        // No tasks in local queues - try to receive from channels
-                        let received = self.receive_tasks(&mut local_io_queue, &mut local_cpu_queue).await;
-                    
-                        if !received {
-                            // If we've completed all tasks, we're done
-                            if self.evaluation_metrics.are_all_tasks_completed().await {
-                                println!("Worker {}: All {} tasks completed, exiting", self.worker_id, self.evaluation_metrics.get_total_tasks().await);
-                                break;
-                            }
-                            // Not all tasks completed yet - keep trying with a small delay
-                            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                        }
+                } else if self.num_concurrent_tasks == 2 && tasks_to_process.len() == 2 {
+                    // Concurrent: process 2 tasks at the same time
+                    let task_2 = tasks_to_process.pop().unwrap();
+                    let task_1 = tasks_to_process.pop().unwrap();
+                    tokio::join!(
+                        self.run_task(task_1),
+                        self.run_task(task_2)
+                    );
+                } else {
+                    // Sequential: process tasks one at a time
+                    for task in tasks_to_process {
+                        self.run_task(task).await;
                     }
                 }
             }
