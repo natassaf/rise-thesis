@@ -18,8 +18,8 @@ use crate::evaluation_metrics::EvaluationMetrics;
         execution_notify: Arc<Notify>, // Signal to workers to start processing
         evaluation_metrics: Arc<EvaluationMetrics>, // Evaluation metrics storage
         pin_cores: bool,
-        cpu_bound_task_ids: Arc<Mutex<Vec<String>>>, // CPU-bound task IDs
-        io_bound_task_ids: Arc<Mutex<Vec<String>>>,  // I/O-bound task IDs
+        // cpu_bound_task_ids: Arc<Mutex<Vec<String>>>, // CPU-bound task IDs
+        // io_bound_task_ids: Arc<Mutex<Vec<String>>>,  // I/O-bound task IDs
     }
 
     impl SchedulerEngine{
@@ -46,8 +46,8 @@ use crate::evaluation_metrics::EvaluationMetrics;
             // Mount the model_1 directory so ONNX models can be accessed
             let workers: Vec<Arc<Worker>> = core_ids[0..num_workers_to_start].iter().map(|core_id| {
                 // Each worker gets its own WasmComponentLoader instance
-                let worker_wasm_loader = Arc::new(Mutex::new(crate::wasm_loaders::WasmComponentLoader::new("/home/pi/rise-thesis/models".to_string())));
-                
+                // let worker_wasm_loader = Arc::new(Mutex::new(crate::wasm_loaders::WasmComponentLoader::new("/home/pi/rise-thesis/models".to_string())));
+                let worker_wasm_loader = Arc::new(Mutex::new(crate::wasm_loaders::WasmComponentLoader::new("models".to_string())));
                 Arc::new(Worker::new(
                     core_id.id, 
                     *core_id, 
@@ -67,13 +67,15 @@ use crate::evaluation_metrics::EvaluationMetrics;
                 execution_notify,
                 evaluation_metrics,
                 pin_cores,
-                cpu_bound_task_ids: Arc::new(Mutex::new(Vec::new())),
-                io_bound_task_ids: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
-        pub async fn start_scheduler(&mut self)-> Result<Vec<std::thread::JoinHandle<()>>, Error>{
-            // Capture baseline value before the closure
+        pub async fn start_scheduler(&mut self)-> Result<Vec<std::thread::JoinHandle<()>>, Error> {
+            // This function is used to start the scheduler and is called by the main function.
+            // It pins the worker's main thread to its assigned core if pin_cores is true.
+            // It creates a local runtime just for this thread and runs the worker's async logic on this pinned thread.
+            // Finally, it pushes the handler to the handlers vector and returns the handlers vector.
+
             let pin_cores = self.pin_cores.clone();
             
             let mut handlers:Vec<std::thread::JoinHandle<()>> = vec![];
@@ -84,7 +86,6 @@ use crate::evaluation_metrics::EvaluationMetrics;
                 
                 // This blocks the thread and pins it to the core
                 let handler: std::thread::JoinHandle<()> = std::thread::spawn(move || {
-                    
                     // Pin worker thread to its assigned core
                     if pin_cores_clone{
                         let res = core_affinity::set_for_current(worker.core_id);
@@ -112,8 +113,16 @@ use crate::evaluation_metrics::EvaluationMetrics;
             Ok(handlers)
             // self.execute_jobs_continuously().await;
         }
+        
+        // async fn store_task_ids_to_self(&mut self, io_bound_task_ids: Vec<String>, cpu_bound_task_ids: Vec<String>){
+        //     *self.cpu_bound_task_ids.lock().await = cpu_bound_task_ids;
+        //     *self.io_bound_task_ids.lock().await = io_bound_task_ids;
+        // }
+
         pub async fn predict_and_sort(&mut self, scheduling_algorithm: String){
-            // Create the appropriate scheduler algorithm based on the request
+
+            // Get the jobs from the submitted jobs vector and add them to the two channels for the workers to pull from and process
+            // Create the appropriate scheduler algorithm based on the request 
             let scheduler_algo: Box<dyn SchedulerAlgorithm> = match scheduling_algorithm.as_str() {
                 "memory_time_aware" => Box::new(MemoryTimeAwareSchedulerAlgorithm::new()),
                 "baseline" => Box::new(BaselineStaticSchedulerAlgorithm::new()),
@@ -125,18 +134,15 @@ use crate::evaluation_metrics::EvaluationMetrics;
             // Schedule tasks using the selected algorithm (does predictions and sorting)
             let (io_bound_task_ids, cpu_bound_task_ids) = scheduler_algo.prioritize_tasks(&self.submitted_jobs).await;
             
-            // Store the task ID sets in SchedulerEngine
-            let mut stored_cpu_bound = self.cpu_bound_task_ids.lock().await;
-            let mut stored_io_bound = self.io_bound_task_ids.lock().await;
-            *stored_cpu_bound = cpu_bound_task_ids.clone();
-            *stored_io_bound = io_bound_task_ids.clone();
+            // // Store the task ID sets in SchedulerEngine)
+            // self.store_task_ids_to_self(io_bound_task_ids, cpu_bound_task_ids).await;
             
-            // Also store in SubmittedJobs so workers can access them
-            self.submitted_jobs.set_cpu_bound_task_ids(cpu_bound_task_ids.clone()).await;
-            self.submitted_jobs.set_io_bound_task_ids(io_bound_task_ids.clone()).await;
+            // // Also store in SubmittedJobs so workers can access them
+            self.submitted_jobs.set_cpu_bound_task_ids(cpu_bound_task_ids).await;
+            self.submitted_jobs.set_io_bound_task_ids(io_bound_task_ids).await;
             
-            println!("=== Predictions and sorting completed ===");
-            println!("=== Separated tasks: {} CPU-bound, {} I/O-bound ===", cpu_bound_task_ids.len(), io_bound_task_ids.len());
+            // println!("=== Predictions and sorting completed ===");
+            // println!("=== Separated tasks: {} CPU-bound, {} I/O-bound ===", self.cpu_bound_task_ids.lock().await.len(), self.io_bound_task_ids.lock().await.len());
         }
 
         pub async fn execute_jobs(&mut self){
@@ -154,8 +160,8 @@ use crate::evaluation_metrics::EvaluationMetrics;
             println!("=== Execution started at {:?} with {} tasks ===", start_time, jobs.len());
             
             // Distribute tasks to shared channels - workers will pull when free
-            let io_bound_ids = self.io_bound_task_ids.lock().await.clone();
-            let cpu_bound_ids = self.cpu_bound_task_ids.lock().await.clone();
+            let io_bound_ids = self.submitted_jobs.io_bound_task_ids.lock().await.clone();
+            let cpu_bound_ids = self.submitted_jobs.cpu_bound_task_ids.lock().await.clone();
             
             let mut io_count = 0;
             let mut cpu_count = 0;

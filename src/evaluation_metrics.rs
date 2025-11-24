@@ -19,7 +19,11 @@ impl EvaluationMetrics {
             completed_count: Arc::new(tokio::sync::Mutex::new(0)),
         }
     }
-
+    pub async fn are_all_tasks_completed(&self) -> bool {
+        let completed_count = self.get_completed_count().await;
+        let total_tasks = self.get_total_tasks().await;
+        total_tasks > 0 && completed_count > 0 && completed_count == total_tasks
+    }
     pub fn set_execution_start_time(&self, start_time: Instant) {
         *self.execution_start_time.lock().unwrap() = Some(start_time);
     }

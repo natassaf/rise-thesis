@@ -49,30 +49,6 @@ fn input_to_wasm_event_val(input:String) -> wasmtime::component::Val {
     wasmtime::component::Val::Record(record_fields.into())
 }
 
-fn create_wasm_event_val_for_matrix() -> wasmtime::component::Val {
-    // Define the input matrices as Rust vectors.
-    let mat1 = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
-    let mat2 = vec![vec![5.0, 6.0], vec![7.0, 8.0]];
-
-    // Construct the JSON string to pass as the input event.
-    let input_json = json!({
-        "mat1": mat1,
-        "mat2": mat2
-    }).to_string();
-
-    // Convert the Rust String into the Wasmtime Val::String type.
-    let event_val = wasmtime::component::Val::String(input_json.into());
-
-    // Create a vector of tuples, where each tuple contains the field name
-    // and its corresponding Val.
-    let record_fields = vec![
-        ("event".to_string(), event_val)
-    ];
-
-    // Return the final Val::Record.
-    wasmtime::component::Val::Record(record_fields.into())
-}
-
 impl Worker{
     pub fn new(worker_id:usize, core_id:CoreId, wasm_loader: Arc<Mutex<WasmComponentLoader>>, io_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, cpu_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, execution_notify: Arc<Notify>, evaluation_metrics: Arc<EvaluationMetrics>)->Self{
         let shutdown_flag = Arc::new(Mutex::new(false));
@@ -251,6 +227,8 @@ impl Worker{
 
     // Run a single task - this runs directly on the worker's runtime
     // Each worker processes one task at a time, but multiple workers run in parallel
+
+
     async fn run_task(&self, task: Job) {
         let task_id = task.id.clone();
         
@@ -390,7 +368,7 @@ impl Worker{
                 break;
             }
             
-            // Wait for signal to start processing (from execute_jobs endpoint)
+            // Wait for signal to start processing (from execute_jobs endpoint)-code blocks here until the signal is received
             self.execution_notify.notified().await;
             
             println!("Worker {}: Starting to process tasks", self.worker_id);
@@ -428,21 +406,12 @@ impl Worker{
                     let received = self.receive_tasks().await;
                     
                     if !received {
-                        // No tasks received from channels - check if all tasks are actually done
-                        // by checking evaluation metrics
-                        let completed_count = self.evaluation_metrics.get_completed_count().await;
-                        let total_tasks = self.evaluation_metrics.get_total_tasks().await;
-                        
                         // If we've completed all tasks, we're done
-                        if total_tasks > 0 && completed_count >= total_tasks {
-                            println!("Worker {}: All {} tasks completed, exiting", self.worker_id, total_tasks);
+                        if self.evaluation_metrics.are_all_tasks_completed().await {
+                            println!("Worker {}: All {} tasks completed, exiting", self.worker_id, self.evaluation_metrics.get_total_tasks().await);
                             break;
                         }
-                        
                         // Not all tasks completed yet - keep trying with a small delay
-                        // This handles race conditions where tasks are still being processed
-                        // by other workers or are in transit through channels
-                        // Use a slightly longer delay to reduce mutex contention
                         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                     }
                 }

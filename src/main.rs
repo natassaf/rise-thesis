@@ -67,7 +67,8 @@ async fn main() -> std::io::Result<()> {
     static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
     
     // Initialize scheduler object and job logger 
-    // Wrapped in web::Data so that we configure them as shared resources across HTTPServer threads 
+    // Wrapped in web::Data so that we configure them as shared resources across HTTPServer threads  ßß
+    // Jobs will be added here with submit jobs endpoint and the scheduler will be able to see the updated vectore, pull the jobs and add then into channels for the workers to pull from and process
     let jobs_log: web::Data<SubmittedJobs> = web::Data::new(SubmittedJobs::new());
 
 
@@ -86,7 +87,7 @@ async fn main() -> std::io::Result<()> {
     let worker_handlers_for_spawn = handlers_data.clone();
     let scheduler_for_shutdown = scheduler.clone();
 
-    // Store the scheduler handle so we can abort it on shutdown
+    // Store the workers handlers and the scheduler handle so we can abort it on shutdown
     let scheduler_handle = tokio::spawn(async move {
         match scheduler_for_spawn.lock().await.start_scheduler().await {
             Ok(handles) => {
