@@ -13,7 +13,9 @@ pub async fn handle_kill(app_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHand
 
 pub async fn handle_predict_and_sort(task: web::Json<ExecuteTasksRequest>, app_data: web::Data<Arc<Mutex<SchedulerEngine>>>)->impl Responder{
     let mut scheduler = app_data.lock().await;
+    println!("Task received: {:?}", task);
     let scheduling_algorithm = task.into_inner().scheduling_algorithm;
+    println!("Predicting and sorting tasks with {} algorithm", scheduling_algorithm);
     scheduler.predict_and_sort(scheduling_algorithm).await;
     HttpResponse::Ok().body(format!("Predictions and sorting completed"))
 }

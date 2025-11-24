@@ -33,8 +33,6 @@ pub struct Worker{
     pub core_id:CoreId,
     io_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, // Shared IO-bound task channel receiver
     cpu_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, // Shared CPU-bound task channel receiver
-    local_io_queue: Arc<Mutex<VecDeque<Job>>>, // Local queue for IO-bound tasks
-    local_cpu_queue: Arc<Mutex<VecDeque<Job>>>, // Local queue for CPU-bound tasks
     shutdown_flag: Arc<Mutex<bool>>,
     wasm_loader: Arc<Mutex<WasmComponentLoader>>,
     execution_notify: Arc<Notify>, // Wait for signal to start processing
@@ -57,8 +55,6 @@ impl Worker{
             core_id, 
             io_bound_rx,
             cpu_bound_rx,
-            local_io_queue: Arc::new(Mutex::new(VecDeque::new())),
-            local_cpu_queue: Arc::new(Mutex::new(VecDeque::new())),
             shutdown_flag, 
             wasm_loader, 
             execution_notify, 
@@ -109,65 +105,6 @@ impl Worker{
         println!("Stored compressed result for task {}: {} bytes -> {} bytes", 
                  task_id, result_string.len(), compressed_data.len());
     }
-
-    // pub async fn run_job(core_id: CoreId, task_id: usize, task_n: usize)->task::JoinHandle<Value>{
-    //     task::spawn_blocking(move || {     
-    //                     core_affinity::set_for_current(core_id);
-    //                     println!("Running task {} on core {:?}", task_id, core_id);
-    //                     let result:Value = fibonacci(task_n);
-    //                     Self::store_result(task_id, &result);
-    //                     println!("Finished task {}", task_id);
-    //                     result
-    //                 })
-    // }
-
-    // pub async fn run_wasm_job_module(core_id: CoreId, task_id: usize, task_input_bytes: Vec<u8>, path_to_module:String, func_name:String){
-    //     // Set up Wasmtime engine and module outside blocking
-    //     // let encoding_config = config::standard();
-    //     // let (original_input, _): ((Vec<Vec<f32>>, Vec<Vec<f32>>), _) = decode_from_slice(&task_input_bytes, encoding_config).expect("Failed to decode mat1");
-    //     let handle = task::spawn_blocking(move || {
-    //         core_affinity::set_for_current(core_id);
-    //         let mut wasm_loader = ModuleWasmLoader::new();
-    //         let (loaded_func, memory) = wasm_loader.load::<(u32, u32, u32, u32), ()>(path_to_module, func_name);
-    //         println!{"Task {task_id} running on core {:?}", core_id.clone()};
-            
-    //         let input_ptr = 0;
-    //         let out_ptr = task_input_bytes.len();
-    //         let output_len_ptr = out_ptr + 1024; // reserve some extra space for output_len
-    //         memory.write(&mut wasm_loader.store, input_ptr as usize, &task_input_bytes).unwrap();
-    //         memory.write(&mut wasm_loader.store, output_len_ptr as usize, &[0u8; 4]).unwrap();
-
-    //         // Call Wasm function
-    //         loaded_func.call(
-    //             &mut wasm_loader.store,
-    //             (
-    //                 input_ptr as u32,
-    //                 task_input_bytes.len() as u32,
-    //                 out_ptr as u32,
-    //                 output_len_ptr as u32
-    //             ),
-    //         ).unwrap();
-    //         // Read result
-    //         let mut output_len_buf = [0u8; 4];
-    //         memory.read(&mut wasm_loader.store, output_len_ptr as usize, &mut output_len_buf).unwrap();
-    //         let output_len = u32::from_le_bytes(output_len_buf);
-    //         let mut result_bytes = vec![0u8; output_len as usize];
-    //         memory.read(&mut wasm_loader.store, out_ptr as usize, &mut result_bytes).unwrap();
-    //         let save_file_name = format!("results/result_{}.txt", task_id);
-    //         let _res: std::result::Result<(), io::Error> = store_encoded_result(&result_bytes.clone(), &save_file_name);
-            
-    //         // let encoding_config = bincode::config::standard();
-    //         // let (result, _bytes_read): (Vec<Vec<f32>>, _) = decode_from_slice(&result_bytes, encoding_config).unwrap();
-    //         // println!("result: {:?}", result);
-    //         println!("Finished wasm task {:?}", task_id);
-    //         result_bytes
-    //     });
-    //     let _result = match handle.await {
-    //         Ok(result) => Some(result),
-    //         Err(e) => None,
-    //     };
-    //     ()
-    // }
     
     pub async fn run_wasm_job_component(
         core_id: CoreId, 
@@ -203,31 +140,6 @@ impl Worker{
         
         Ok((task_id, result))
     }
-
-// pub async fn  run_job(&self, task_id:String, binary_path: String, func_name:String, payload:String, folder_to_mount:String){
-    //     let core_id: CoreId = self.core_id.clone(); // clone cause we need to pass by value a copy on each thread and it is bound to self
-    //     let task_module_path = binary_path;
-    //     let scheduler_ref = self.scheduler.clone();
-        
-    //     // Spawn a blocking task to map the worker to the core 
-    //     let handler = Self::run_wasm_job_component(core_id, task_id.clone() ,task_module_path, func_name, payload, folder_to_mount, self.wasm_loader.clone()).await;
-        
-    //     // Wait for task to complete and get the task_id back
-    //     // Note: handler.await returns Result<(String, Result<...>), JoinError>
-    //     let completed_task_id = match handler.await {
-    //         Ok((task_id_result, _result)) => task_id_result,
-    //         Err(_) => task_id.clone(), // If join failed, use original task_id
-    //     };
-        
-    //     // Notify scheduler that task is complete
-    //     if let Some(scheduler) = scheduler_ref.lock().await.as_ref() {
-    //         scheduler.lock().await.on_task_completed(completed_task_id).await;
-    //     }
-    // }
-
-    // Run a single task - this runs directly on the worker's runtime
-    // Each worker processes one task at a time, but multiple workers run in parallel
-
 
     async fn run_task(&self, task: Job) {
         let task_id = task.id.clone();
@@ -316,7 +228,7 @@ impl Worker{
     // Receive tasks from channels and add to local queues
     // Returns true if any tasks were received, false otherwise
     // Uses a work-stealing approach: try to get one task at a time to ensure fair distribution
-    async fn receive_tasks(&self) -> bool {
+    async fn receive_tasks(&self, queue1: &mut Arc<Mutex<VecDeque<Job>>>, queue2: &mut Arc<Mutex<VecDeque<Job>>>) -> bool {
         let mut received_any = false;
         
         // Try to receive ONE task from IO-bound channel (fair distribution)
@@ -326,7 +238,7 @@ impl Worker{
             match rx.try_recv() {
                 Ok(job) => {
                     drop(rx);
-                    let mut queue = self.local_io_queue.lock().await;
+                    let mut queue = queue1.lock().await;
                     queue.push_back(job);
                     received_any = true;
                     // Only take one task to allow other workers a chance
@@ -345,7 +257,7 @@ impl Worker{
             match rx.try_recv() {
                 Ok(job) => {
                     drop(rx);
-                    let mut queue = self.local_cpu_queue.lock().await;
+                    let mut queue = queue2.lock().await;
                     queue.push_back(job);
                     received_any = true;
                 }
@@ -359,8 +271,21 @@ impl Worker{
         received_any
     }
 
+    async fn get_task_from_local_queue(local_queue: &mut Arc<Mutex<VecDeque<Job>>>) -> Option<Job> {
+        // Get one task to process (prefer IO-bound, then CPU-bound)
+        let mut lq = local_queue.lock().await;
+        if let Some(task) = lq.pop_front() {
+            Some(task)
+        } else {
+            None
+        }
+
+    }
+
     pub async fn start(&self){
         println!("Worker: {:?} started on core id : {:?}", self.worker_id, self.core_id);
+        let mut local_io_queue:Arc<Mutex<VecDeque<Job>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let mut local_cpu_queue:Arc<Mutex<VecDeque<Job>>> = Arc::new(Mutex::new(VecDeque::new()));
         loop{
             // Check for shutdown signal
             if *self.shutdown_flag.lock().await {
@@ -373,46 +298,41 @@ impl Worker{
             
             println!("Worker {}: Starting to process tasks", self.worker_id);
             
-            // Process tasks one at a time - each worker processes one task at a time
-            // Multiple workers run in parallel (one task per worker)
             loop {
                 // Check for shutdown signal
                 if *self.shutdown_flag.lock().await {
                     println!("Worker: {:?} shutting down", self.worker_id);
                     return;
                 }
+                // Get tasks from local queues
+                let task_to_process_1 = Self::get_task_from_local_queue(&mut local_io_queue).await;
+                let task_to_process_2 = Self::get_task_from_local_queue(&mut local_cpu_queue).await;
                 
-                // Get one task to process (prefer IO-bound, then CPU-bound)
-                let task_to_process = {
-                    let mut io_queue = self.local_io_queue.lock().await;
-                    if let Some(task) = io_queue.pop_front() {
-                        Some(task)
-                    } else {
-                        drop(io_queue);
-                        let mut cpu_queue = self.local_cpu_queue.lock().await;
-                        cpu_queue.pop_front()
+                // Process tasks
+                match (task_to_process_1, task_to_process_2) {
+                    (Some(task_1), Some(task_2)) => {
+                        self.run_task(task_1).await;
+                        self.run_task(task_2).await;
                     }
-                };
-                
-                if let Some(task) = task_to_process {
-                    // Process the task
-                    self.run_task(task).await;
+                    (Some(task_1), None) => {
+                        self.run_task(task_1).await;
+                    }
+                    (None, Some(task_2)) => {
+                        self.run_task(task_2).await;
+                    }
+                    (None, None) => {
+                        // No tasks in local queues - try to receive from channels
+                        let received = self.receive_tasks(&mut local_io_queue, &mut local_cpu_queue).await;
                     
-                    // After processing, try to receive ONE more task from channels
-                    // Taking only one ensures fair distribution among workers
-                    self.receive_tasks().await;
-                } else {
-                    // No tasks in local queues - try to receive from channels
-                    let received = self.receive_tasks().await;
-                    
-                    if !received {
-                        // If we've completed all tasks, we're done
-                        if self.evaluation_metrics.are_all_tasks_completed().await {
-                            println!("Worker {}: All {} tasks completed, exiting", self.worker_id, self.evaluation_metrics.get_total_tasks().await);
-                            break;
+                        if !received {
+                            // If we've completed all tasks, we're done
+                            if self.evaluation_metrics.are_all_tasks_completed().await {
+                                println!("Worker {}: All {} tasks completed, exiting", self.worker_id, self.evaluation_metrics.get_total_tasks().await);
+                                break;
+                            }
+                            // Not all tasks completed yet - keep trying with a small delay
+                            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                         }
-                        // Not all tasks completed yet - keep trying with a small delay
-                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                     }
                 }
             }

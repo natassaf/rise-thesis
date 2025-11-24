@@ -72,17 +72,26 @@ impl BaselineStaticSchedulerAlgorithm{
 #[async_trait]
 impl SchedulerAlgorithm for BaselineStaticSchedulerAlgorithm{
     async fn prioritize_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>) -> (Vec<String>, Vec<String>) {
-        // Sort jobs by arrival time (oldest first) so workers process them in order
-        let job_ids_before: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
-        println!("Sorting jobs by arrival time before: {:?}", job_ids_before);
-
         self.sort_by_arrival_time(submitted_jobs).await;
-
-        let job_ids_after: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
-        println!("Sorting jobs by arrival time after: {:?}", job_ids_after);
         
-        // Baseline algorithm doesn't separate by bound type, return empty vectors
-        (Vec::new(), Vec::new())
+        // Separate jobs into CPU-bound and I/O-bound task ID vectors (maintaining sort order)
+        let mut first_hald_jobs: Vec<String> = Vec::new();
+        let mut second_half_jobs: Vec<String> = Vec::new();
+        let jobs = submitted_jobs.get_jobs().await.to_vec();
+        let num_jobs = jobs.len();
+        for (i, job) in jobs.iter().enumerate() {
+            if i < num_jobs / 2 {
+                first_hald_jobs.push(job.id.clone());
+            } else {
+                second_half_jobs.push(job.id.clone());
+            }
+        }
+        
+        // Store separated task ID sets in SubmittedJobs
+        submitted_jobs.set_cpu_bound_task_ids(first_hald_jobs.clone()).await;
+        submitted_jobs.set_io_bound_task_ids(second_half_jobs.clone()).await;
+            
+        (first_hald_jobs, second_half_jobs)
     }
 }
 

@@ -103,7 +103,7 @@ use crate::evaluation_metrics::EvaluationMetrics;
                         .unwrap();
 
                     // Run the worker's async logic on this pinned thread
-                    rt.block_on(async move {
+                    rt.block_on(async {
                         worker.start().await;
                     });
                 });
