@@ -2,7 +2,8 @@
 
 ## Overview
 
-This project is a scheduler system that manages and prioritizes WebAssembly (WASM) tasks based on memory and execution time predictions.
+This project is a scheduler system that manages and prioritizes WebAssembly (WASM) tasks based on memory and execution time predictions made using the .wat file. 
+The wasm modules use input and output schemas similar to AWS lambda functions where a prespecified way to pass input is defined and it's the WASM tasks creator's job to decode the input within the wasm module and return the output on the allocated string type field.
 
 ## Required Repositories
 

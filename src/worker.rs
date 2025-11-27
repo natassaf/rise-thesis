@@ -308,19 +308,24 @@ impl Worker{
                 
                 // Collect tasks from local queues
                 let mut tasks_to_process = Vec::new();
-                
-                // Collect up to num_concurrent_tasks (or 1 if sequential)
-                let max_tasks = if self.num_concurrent_tasks == 1 { 1 } else { self.num_concurrent_tasks };
-                
-                if let Some(task) = Self::get_task_from_local_queue(&mut local_io_queue).await {
-                    tasks_to_process.push(task);
-                }
-                if tasks_to_process.len() < max_tasks {
-                    if let Some(task) = Self::get_task_from_local_queue(&mut local_cpu_queue).await {
-                        tasks_to_process.push(task);
+                match self.num_concurrent_tasks {
+                    1=>{
+                        if let Some(task) = Self::get_task_from_local_queue(&mut local_io_queue).await {
+                            tasks_to_process.push(task);
+                        }
+                    },
+                    2=>{ 
+                        if let Some(task) = Self::get_task_from_local_queue(&mut local_io_queue).await {
+                            tasks_to_process.push(task);
+                        }
+                        if let Some(task) = Self::get_task_from_local_queue(&mut local_cpu_queue).await {
+                            tasks_to_process.push(task);
+                        }
                     }
+                    ,
+                    _=> panic!("Invalid number of concurrent tasks: {}", self.num_concurrent_tasks),
                 }
-                
+
                 // Process tasks or fetch more from channels
                 if tasks_to_process.is_empty() {
                     let received = self.receive_tasks(&mut local_io_queue, &mut local_cpu_queue).await;
@@ -332,7 +337,7 @@ impl Worker{
                         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                     }
                 } else if self.num_concurrent_tasks == 2 && tasks_to_process.len() == 2 {
-                    // Concurrent: process 2 tasks at the same time
+                    // Concurrent, process 2 tasks at the same time
                     let task_2 = tasks_to_process.pop().unwrap();
                     let task_1 = tasks_to_process.pop().unwrap();
                     tokio::join!(
@@ -340,7 +345,7 @@ impl Worker{
                         self.run_task(task_2)
                     );
                 } else {
-                    // Sequential: process tasks one at a time
+                    // Sequentially,  process tasks one at a time
                     for task in tasks_to_process {
                         self.run_task(task).await;
                     }

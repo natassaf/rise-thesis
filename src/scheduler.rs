@@ -3,7 +3,7 @@ use tokio::sync::{Mutex, Notify, mpsc};
 
 use actix_web::web;
 use tokio::time::error::Error;
-use crate::{optimized_scheduling_preprocessing::scheduler_algorithms::{BaselineStaticSchedulerAlgorithm, MemoryTimeAwareSchedulerAlgorithm, SchedulerAlgorithm},worker::Worker};
+use crate::{optimized_scheduling_preprocessing::scheduler_algorithms::{BaselineStaticSchedulerAlgorithm, MemoryTimeAwareSchedulerAlgorithm, Improvement1, SchedulerAlgorithm},worker::Worker};
 use core_affinity::*;
 use crate::api::api_objects::{SubmittedJobs, Job};
 use crate::evaluation_metrics::EvaluationMetrics;
@@ -127,7 +127,8 @@ use crate::evaluation_metrics::EvaluationMetrics;
             let scheduler_algo: Box<dyn SchedulerAlgorithm> = match scheduling_algorithm.as_str() {
                 "memory_time_aware" => Box::new(MemoryTimeAwareSchedulerAlgorithm::new()),
                 "baseline" => Box::new(BaselineStaticSchedulerAlgorithm::new()),
-                _ => panic!("Invalid scheduling algorithm: {}. Must be 'memory_time_aware' or 'baseline'", scheduling_algorithm),
+                "improvement1" => Box::new(Improvement1::new()),
+                _ => panic!("Invalid scheduling algorithm: {}. Must be 'memory_time_aware', 'baseline', or 'improvement1'", scheduling_algorithm),
             };
             
             println!("=== Starting predictions and sorting with {} algorithm ===", scheduling_algorithm);
