@@ -1,37 +1,36 @@
-use std::sync::Arc;
-use core_affinity::{CoreId};
-use tokio::sync::{Mutex, Notify, mpsc};
-use crate::evaluation_metrics::EvaluationMetrics;
 use crate::api::api_objects::Job;
+use crate::channel_objects::{JobAskStatus, JobType, Message, ToSchedulerMessage, ToWorkerMessage};
 use crate::wasm_loaders::WasmComponentLoader;
-use wasmtime::component::Val;
-use std::collections::VecDeque;
-use flate2::write::GzEncoder;
+use crate::{channel_objects::MessageType, evaluation_metrics::EvaluationMetrics};
+use base64::{Engine, engine::general_purpose};
+use core_affinity::CoreId;
 use flate2::Compression;
 use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use std::io::Read;
-use base64::{Engine as _, engine::general_purpose};
+use std::sync::Arc;
+use tokio::sync::{Mutex, Notify, mpsc};
+use wasmtime::component::Val;
 
 /// Decompress a gzip-compressed base64 payload
 fn decompress_payload(compressed_base64: &str) -> Result<String, Box<dyn std::error::Error>> {
     // Decode base64 to get compressed bytes
     let compressed_bytes = general_purpose::STANDARD.decode(compressed_base64)?;
-    
+
     // Decompress using gzip
     let mut decoder = GzDecoder::new(&compressed_bytes[..]);
     let mut decompressed = String::new();
     decoder.read_to_string(&mut decompressed)?;
-    
+
     Ok(decompressed)
 }
 
-
 // Worker is mapped to a core id and pulls tasks from shared channels when free
-pub struct Worker{
-    worker_id:usize,
-    pub core_id:CoreId,
-    io_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, // Shared IO-bound task channel receiver
-    cpu_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, // Shared CPU-bound task channel receiver
+pub struct Worker {
+    pub worker_id: usize,
+    pub core_id: CoreId,
+    worker_channel_tx: mpsc::Sender<(MessageType, Message)>,
+    worker_channel_rx: Arc<Mutex<mpsc::Receiver<(MessageType, Message)>>>,
     shutdown_flag: Arc<Mutex<bool>>,
     wasm_loader: Arc<Mutex<WasmComponentLoader>>,
     execution_notify: Arc<Notify>, // Wait for signal to start processing
@@ -39,25 +38,33 @@ pub struct Worker{
     num_concurrent_tasks: usize,
 }
 
-fn input_to_wasm_event_val(input:String) -> wasmtime::component::Val {
+fn input_to_wasm_event_val(input: String) -> wasmtime::component::Val {
     let event_val = wasmtime::component::Val::String(input.into());
-    let record_fields = vec![
-        ("event".to_string(), event_val)
-    ];
+    let record_fields = vec![("event".to_string(), event_val)];
     wasmtime::component::Val::Record(record_fields.into())
 }
 
-impl Worker{
-    pub fn new(worker_id:usize, core_id:CoreId, wasm_loader: Arc<Mutex<WasmComponentLoader>>, io_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, cpu_bound_rx: Arc<Mutex<mpsc::Receiver<Job>>>, execution_notify: Arc<Notify>, evaluation_metrics: Arc<EvaluationMetrics>, num_concurrent_tasks: usize)->Self{
+impl Worker {
+    pub fn new(
+        worker_id: usize,
+        core_id: CoreId,
+        wasm_loader: Arc<Mutex<WasmComponentLoader>>,
+        worker_channel_tx: mpsc::Sender<(MessageType, Message)>,
+        worker_channel_rx: mpsc::Receiver<(MessageType, Message)>,
+        execution_notify: Arc<Notify>,
+        evaluation_metrics: Arc<EvaluationMetrics>,
+        num_concurrent_tasks: usize,
+    ) -> Self {
         let shutdown_flag = Arc::new(Mutex::new(false));
-        Worker{
-            worker_id, 
-            core_id, 
-            io_bound_rx,
-            cpu_bound_rx,
-            shutdown_flag, 
-            wasm_loader, 
-            execution_notify, 
+        let worker_channel_rx = Arc::new(Mutex::new(worker_channel_rx));
+        Worker {
+            worker_id,
+            core_id,
+            worker_channel_tx,
+            worker_channel_rx,
+            shutdown_flag,
+            wasm_loader,
+            execution_notify,
             evaluation_metrics,
             num_concurrent_tasks,
         }
@@ -68,29 +75,31 @@ impl Worker{
         *flag = true;
     }
 
-    pub fn store_result_uncompressed<T:std::fmt::Display>(task_id:&str, result:&T){
+    pub fn store_result_uncompressed<T: std::fmt::Display>(task_id: &str, result: &T) {
         // Store compressed result in a file named after the task
         let file_name = format!("results/result_{}.txt", task_id);
-        
+
         // Format the result
         let result_string = format!("Result: {}", result);
-        
-        
+
         // Write the compressed data to file
-        std::fs::write(&file_name, &result_string).expect("Failed to write compressed result to file");
-        
-        println!("Stored result for task {}: {} ", 
-                 task_id, result_string.len());
+        std::fs::write(&file_name, &result_string)
+            .expect("Failed to write compressed result to file");
+
+        println!(
+            "Stored result for task {}: {} ",
+            task_id,
+            result_string.len()
+        );
     }
 
-
-    pub fn store_result<T:std::fmt::Display>(task_id:&str, result:&T){
+    pub fn store_result<T: std::fmt::Display>(task_id: &str, result: &T) {
         // Store compressed result in a file named after the task
         let file_name = format!("results/result_{}.gz", task_id);
-        
+
         // Format the result
         let result_string = format!("Result: {}", result);
-        
+
         // Compress the result using gzip
         let mut compressed_data = Vec::new();
         {
@@ -99,52 +108,68 @@ impl Worker{
                 .expect("Failed to compress result");
             encoder.finish().expect("Failed to finish compression");
         }
-        
+
         // Write the compressed data to file
-        std::fs::write(&file_name, &compressed_data).expect("Failed to write compressed result to file");
-        
-        println!("Stored compressed result for task {}: {} bytes -> {} bytes", 
-                 task_id, result_string.len(), compressed_data.len());
+        std::fs::write(&file_name, &compressed_data)
+            .expect("Failed to write compressed result to file");
+
+        println!(
+            "Stored compressed result for task {}: {} bytes -> {} bytes",
+            task_id,
+            result_string.len(),
+            compressed_data.len()
+        );
     }
-    
+
     pub async fn run_wasm_job_component(
-        core_id: CoreId, 
-        task_id: String, 
+        core_id: CoreId,
+        task_id: String,
         component_name: String,
-        func_name: String, 
-        payload: String, 
-        shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>, 
-        evaluation_metrics: Arc<EvaluationMetrics>, 
-        start_time: std::time::Instant
+        func_name: String,
+        payload: String,
+        shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>,
+        evaluation_metrics: Arc<EvaluationMetrics>,
+        start_time: std::time::Instant,
     ) -> Result<(String, Result<Vec<Val>, anyhow::Error>), anyhow::Error> {
         println!("Task {task_id} running on core {:?}", core_id);
-        println!("Running component {:?}, func: {:?}", component_name, func_name);
-        
+        println!(
+            "Running component {:?}, func: {:?}",
+            component_name, func_name
+        );
+
         // Load function - runs on pinned thread
-        let func_to_run = shared_wasm_loader.lock().await.load_func(component_name, func_name).await;
-        
+        let func_to_run = shared_wasm_loader
+            .lock()
+            .await
+            .load_func(component_name, func_name)
+            .await;
+
         // Prepare input
         let input = vec![input_to_wasm_event_val(payload)];
-        
-        let result = shared_wasm_loader.lock().await.run_func(input, func_to_run).await;
-        
+
+        let result = shared_wasm_loader
+            .lock()
+            .await
+            .run_func(input, func_to_run)
+            .await;
+
         match &result {
             Ok(val) => Self::store_result_uncompressed(&task_id, &format!("{:?}", val)),
             Err(e) => Self::store_result_uncompressed(&task_id, &format!("Error: {:?}", e)),
         }
         println!("Finished wasm task {}", task_id);
-        
+
         // Set response time
         let end_time = std::time::Instant::now();
         let response_time = end_time.duration_since(start_time);
         evaluation_metrics.set_response_time(task_id.clone(), response_time);
-        
+
         Ok((task_id, result))
     }
 
     async fn run_task(&self, task: Job) {
         let task_id = task.id.clone();
-        
+
         // Decompress payload if needed
         let payload: String = if task.payload_compressed {
             match decompress_payload(&task.payload) {
@@ -157,197 +182,295 @@ impl Worker{
         } else {
             task.payload.clone()
         };
-        
+
         let func_name = task.func_name.clone();
         let binary_path = task.binary_path.clone();
         let wasm_loader = self.wasm_loader.clone();
         let evaluation_metrics = self.evaluation_metrics.clone();
         let core_id = self.core_id;
-        
+
         // Get start_time from evaluation metrics
         let start_time = evaluation_metrics.get_execution_start_time();
         if start_time.is_none() {
-            eprintln!("Worker {}: Execution not started yet, skipping task {}", self.worker_id, task_id);
+            eprintln!(
+                "Worker {}: Execution not started yet, skipping task {}",
+                self.worker_id, task_id
+            );
             return;
         }
         let start_time = start_time.unwrap();
-        
+
         // Run the task directly on this worker's runtime (which is pinned to the core)
         // This allows multiple workers to run tasks in parallel
         let handler = Worker::run_wasm_job_component(
-            core_id, 
-            task_id.clone(), 
-            binary_path, 
-            func_name, 
-            payload, 
-            wasm_loader, 
-            evaluation_metrics.clone(), 
-            start_time
-        ).await;
-        
+            core_id,
+            task_id.clone(),
+            binary_path,
+            func_name,
+            payload,
+            wasm_loader,
+            evaluation_metrics.clone(),
+            start_time,
+        )
+        .await;
+
         let completed_task_id = match handler {
             Ok((task_id_result, _result)) => task_id_result,
             Err(_) => task_id.clone(),
         };
-        
+
         let completion_time = std::time::Instant::now();
-        evaluation_metrics.set_task_status(completed_task_id.clone(), 1).await;
-        
+        evaluation_metrics
+            .set_task_status(completed_task_id.clone(), 1)
+            .await;
+
         // Check if all tasks are completed
         let completed_count = evaluation_metrics.get_completed_count().await;
         let total_tasks = evaluation_metrics.get_total_tasks().await;
-        
+
         if completed_count > 0 && completed_count == total_tasks {
-            let throughput = evaluation_metrics.calculate_throughput(completion_time, total_tasks).await;
-            let average_response_time_millis = evaluation_metrics.calculate_average_response_time().await;
-            let total_time_duration = if let Some(start) = evaluation_metrics.get_execution_start_time() {
-                completion_time.duration_since(start)
-            } else {
-                std::time::Duration::from_secs(0)
-            };
-            
+            let throughput = evaluation_metrics
+                .calculate_throughput(completion_time, total_tasks)
+                .await;
+            let average_response_time_millis =
+                evaluation_metrics.calculate_average_response_time().await;
+            let total_time_duration =
+                if let Some(start) = evaluation_metrics.get_execution_start_time() {
+                    completion_time.duration_since(start)
+                } else {
+                    std::time::Duration::from_secs(0)
+                };
+
             println!("=== Execution completed ===");
             println!("Total tasks processed: {}", completed_count);
-            println!("Total execution time: {:.2} seconds ({:.2} ms)", total_time_duration.as_secs(), total_time_duration.as_millis());
-            println!("Average response time per task: {:.2} ms", average_response_time_millis);
+            println!(
+                "Total execution time: {:.2} seconds ({:.2} ms)",
+                total_time_duration.as_secs(),
+                total_time_duration.as_millis()
+            );
+            println!(
+                "Average response time per task: {:.2} ms",
+                average_response_time_millis
+            );
             println!("Throughput: {:.2} tasks/second", throughput);
-            
+
             // Store metrics to file
             crate::evaluation_metrics::store_evaluation_metrics(
                 completed_count,
                 total_time_duration.as_secs_f64(),
                 total_time_duration.as_millis() as f64,
                 average_response_time_millis,
-                throughput
+                throughput,
             );
-            
+
             // Reset timing for next execution
             evaluation_metrics.reset().await;
         }
     }
 
-    // Receive tasks from channels and add to local queues
-    // Returns true if any tasks were received, false otherwise
-    // Uses a work-stealing approach: try to get one task at a time to ensure fair distribution
-    async fn receive_tasks(&self, queue1: &mut Arc<Mutex<VecDeque<Job>>>, queue2: &mut Arc<Mutex<VecDeque<Job>>>) -> bool {
-        let mut received_any = false;
-        
-        // Try to receive ONE task from IO-bound channel (fair distribution)
-        // Only take one at a time to prevent one worker from grabbing all tasks
+    pub async fn request_tasks(&self, job_type: JobType) {
+        // Get available memory (using mock for now)
+        let available_memory_mock = 8000000;
+
+        // Create ToSchedulerMessage with the required fields
+        let to_scheduler_msg = ToSchedulerMessage {
+            worker_id: self.worker_id,
+            memory_capacity: available_memory_mock,
+            job_type: job_type.clone(),
+        };
+
+        // Serialize the message to JSON
+        let message_json = match serde_json::to_string(&to_scheduler_msg) {
+            Ok(json) => json,
+            Err(e) => {
+                panic!(
+                    "Worker {}: Failed to serialize ToSchedulerMessage: {}",
+                    self.worker_id, e
+                );
+            }
+        };
+
+        // Create Message wrapper
+        let message = Message {
+            message: message_json,
+            message_type: MessageType::ToSchedulerMessage,
+        };
+
+        // Send the message to the scheduler
+        if let Err(e) = self
+            .worker_channel_tx
+            .send((MessageType::ToSchedulerMessage, message))
+            .await
         {
-            let mut rx = self.io_bound_rx.lock().await;
-            match rx.try_recv() {
-                Ok(job) => {
-                    drop(rx);
-                    let mut queue = queue1.lock().await;
-                    queue.push_back(job);
-                    received_any = true;
-                    // Only take one task to allow other workers a chance
-                    return received_any;
+            panic!(
+                "Worker {}: Failed to send message to scheduler: {}",
+                self.worker_id, e
+            );
+        }
+
+        println!(
+            "Worker {}: Sent task request to scheduler (job_type: {:?}, memory: {})",
+            self.worker_id, job_type, available_memory_mock
+        );
+    }
+
+    pub async fn receive_tasks(&self) -> Vec<Job> {
+        let mut tasks = Vec::new();
+        let mut rx = self.worker_channel_rx.lock().await;
+
+        while tasks.len() < self.num_concurrent_tasks {
+            // Wait for a message from the scheduler
+            match rx.recv().await {
+                Some((message_type, message)) => {
+                    match message_type {
+                        MessageType::ToWorkerMessage => {
+                            match serde_json::from_str::<ToWorkerMessage>(&message.message) {
+                                Ok(to_worker_msg) => match to_worker_msg.status {
+                                    JobAskStatus::Found => {
+                                        tasks.push(to_worker_msg.job);
+                                        println!(
+                                            "Worker {}: Received job from scheduler ({} of {})",
+                                            self.worker_id,
+                                            tasks.len(),
+                                            self.num_concurrent_tasks
+                                        );
+                                    }
+                                    JobAskStatus::Terminate => {
+                                        println!(
+                                            "Worker {}: Received terminate message from scheduler",
+                                            self.worker_id
+                                        );
+                                        break;
+                                    }
+                                    JobAskStatus::NotFound => {
+                                        println!(
+                                            "Worker {}: Job not found from scheduler",
+                                            self.worker_id
+                                        );
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(1))
+                                            .await;
+                                        break;
+                                    }
+                                    JobAskStatus::OutofBoundsJob => {
+                                        println!(
+                                            "Worker {}: Out of bounds job from scheduler",
+                                            self.worker_id
+                                        );
+                                        break;
+                                    }
+                                },
+                                Err(e) => {
+                                    eprintln!(
+                                        "Worker {}: Failed to deserialize ToWorkerMessage: {}",
+                                        self.worker_id, e
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        MessageType::ToSchedulerMessage => {
+                            // This shouldn't happen - worker shouldn't receive ToSchedulerMessage
+                            println!(
+                                "Worker {}: Received unexpected ToSchedulerMessage",
+                                self.worker_id
+                            );
+                        }
+                    }
                 }
-                Err(mpsc::error::TryRecvError::Empty) => {},
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    println!("Worker {}: IO-bound channel disconnected", self.worker_id);
+                None => {
+                    println!(
+                        "Worker {}: Channel closed while waiting for scheduler response",
+                        self.worker_id
+                    );
+                    break;
                 }
             }
         }
-        
-        // Try to receive ONE task from CPU-bound channel (fair distribution)
-        {
-            let mut rx = self.cpu_bound_rx.lock().await;
-            match rx.try_recv() {
-                Ok(job) => {
-                    drop(rx);
-                    let mut queue = queue2.lock().await;
-                    queue.push_back(job);
-                    received_any = true;
-                }
-                Err(mpsc::error::TryRecvError::Empty) => {},
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    println!("Worker {}: CPU-bound channel disconnected", self.worker_id);
-                }
-            }
-        }
-        
-        received_any
+
+        drop(rx); // Release the lock
+
+        println!(
+            "Worker {}: Collected {} tasks from scheduler",
+            self.worker_id,
+            tasks.len()
+        );
+        return tasks;
     }
-
-    async fn get_task_from_local_queue(local_queue: &mut Arc<Mutex<VecDeque<Job>>>) -> Option<Job> {
-        // Get one task to process (prefer IO-bound, then CPU-bound)
-        let mut lq = local_queue.lock().await;
-        if let Some(task) = lq.pop_front() {
-            Some(task)
-        } else {
-            None
-        }
-
-    }
-
-    pub async fn start(&self){
-        println!("Worker: {:?} started on core id : {:?}", self.worker_id, self.core_id);
-        let mut local_io_queue:Arc<Mutex<VecDeque<Job>>> = Arc::new(Mutex::new(VecDeque::new()));
-        let mut local_cpu_queue:Arc<Mutex<VecDeque<Job>>> = Arc::new(Mutex::new(VecDeque::new()));
-        loop{
+    pub async fn start(&self) {
+        println!(
+            "Worker: {:?} started on core id : {:?}",
+            self.worker_id, self.core_id
+        );
+        loop {
             // Check for shutdown signal
             if *self.shutdown_flag.lock().await {
                 println!("Worker: {:?} shutting down", self.worker_id);
                 break;
             }
-            
-            // Wait for signal to start processing (from execute_jobs endpoint)-code blocks here until the signal is received
+
+            // Wait for signal to start processing (from execute_jobs endpoint)
             self.execution_notify.notified().await;
-            
+
             println!("Worker {}: Starting to process tasks", self.worker_id);
-            
+            let mut request_flag = false;
+            let mut tasks_to_process: Vec<Job> = Vec::new();
             loop {
                 // Check for shutdown signal
                 if *self.shutdown_flag.lock().await {
                     println!("Worker: {:?} shutting down", self.worker_id);
                     return;
                 }
-                
-                // Collect tasks from local queues
-                let mut tasks_to_process = Vec::new();
-                
-                // Collect up to num_concurrent_tasks (or 1 if sequential)
-                let max_tasks = if self.num_concurrent_tasks == 1 { 1 } else { self.num_concurrent_tasks };
-                
-                if let Some(task) = Self::get_task_from_local_queue(&mut local_io_queue).await {
-                    tasks_to_process.push(task);
+
+                // Request tasks based on num_concurrent_tasks
+                if self.num_concurrent_tasks == 1
+                    && request_flag == false
+                    && tasks_to_process.is_empty()
+                {
+                    self.request_tasks(JobType::Mixed).await;
+                    request_flag = true;
+                } else if self.num_concurrent_tasks == 2
+                    && request_flag == false
+                    && tasks_to_process.is_empty()
+                {
+                    self.request_tasks(JobType::IOBound).await;
+                    self.request_tasks(JobType::CPUBound).await;
+                    request_flag = true;
                 }
-                if tasks_to_process.len() < max_tasks {
-                    if let Some(task) = Self::get_task_from_local_queue(&mut local_cpu_queue).await {
-                        tasks_to_process.push(task);
-                    }
-                }
-                
-                // Process tasks or fetch more from channels
+
+                tasks_to_process = self.receive_tasks().await;
+
+                // Handle empty tasks
                 if tasks_to_process.is_empty() {
-                    let received = self.receive_tasks(&mut local_io_queue, &mut local_cpu_queue).await;
-                    if !received && self.evaluation_metrics.are_all_tasks_completed().await {
-                        println!("Worker {}: All {} tasks completed, exiting", self.worker_id, self.evaluation_metrics.get_total_tasks().await);
+                    request_flag = false;
+                    if self.evaluation_metrics.are_all_tasks_completed().await {
+                        println!("Worker {}: All tasks completed, exiting", self.worker_id);
                         break;
                     }
-                    if !received {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+
+                // Process tasks based on count
+                match tasks_to_process.len() {
+                    1 => {
+                        self.run_task(tasks_to_process.pop().unwrap()).await;
+                        request_flag = false;
                     }
-                } else if self.num_concurrent_tasks == 2 && tasks_to_process.len() == 2 {
-                    // Concurrent: process 2 tasks at the same time
-                    let task_2 = tasks_to_process.pop().unwrap();
-                    let task_1 = tasks_to_process.pop().unwrap();
-                    tokio::join!(
-                        self.run_task(task_1),
-                        self.run_task(task_2)
-                    );
-                } else {
-                    // Sequential: process tasks one at a time
-                    for task in tasks_to_process {
-                        self.run_task(task).await;
+                    2 => {
+                        let task_2 = tasks_to_process.pop().unwrap();
+                        let task_1 = tasks_to_process.pop().unwrap();
+                        tokio::join!(self.run_task(task_1), self.run_task(task_2));
+                        request_flag = false;
+                    }
+                    _ => {
+                        for _ in 0..tasks_to_process.len() {
+                            let task = tasks_to_process.pop().unwrap();
+                            self.run_task(task).await;
+                        }
+                        request_flag = false;
                     }
                 }
             }
         }
     }
 }
-
-

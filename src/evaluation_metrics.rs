@@ -1,5 +1,5 @@
-use std::sync::{Arc, Mutex as StdMutex};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 /// Evaluation metrics storage - separate from scheduler
@@ -42,10 +42,29 @@ impl EvaluationMetrics {
     }
 
     pub async fn initialize_task_status(&self, task_ids: Vec<String>) {
+        if task_ids.is_empty() {
+            println!(
+                "EvaluationMetrics: Warning - initialize_task_status called with empty task_ids list"
+            );
+            return;
+        }
+
         let mut task_status = self.task_status.lock().await;
-        task_status.clear();
-        for task_id in task_ids {
-            task_status.insert(task_id, 0); // 0 = not processed
+        // Only initialize if the map is empty (first time)
+        if task_status.is_empty() {
+            for task_id in task_ids {
+                task_status.insert(task_id, 0); // 0 = not processed
+            }
+            println!(
+                "EvaluationMetrics: Initialized task status with {} tasks",
+                task_status.len()
+            );
+        } else {
+            // Map already has tasks, don't re-initialize
+            println!(
+                "EvaluationMetrics: Task status map already initialized with {} tasks, skipping re-initialization",
+                task_status.len()
+            );
         }
     }
 
@@ -67,7 +86,8 @@ impl EvaluationMetrics {
     pub async fn calculate_average_response_time(&self) -> f64 {
         let response_times = self.response_time_per_task.lock().unwrap();
         if !response_times.is_empty() {
-            response_times.values().sum::<Duration>().as_millis() as f64 / response_times.len() as f64
+            response_times.values().sum::<Duration>().as_millis() as f64
+                / response_times.len() as f64
         } else {
             0.0
         }
@@ -91,16 +111,21 @@ impl EvaluationMetrics {
 }
 
 // Standalone function to store evaluation metrics to file
-pub fn store_evaluation_metrics(total_tasks: usize, total_time_secs: f64, total_time_ms: f64, avg_time_ms: f64, throughput: f64) {
+pub fn store_evaluation_metrics(
+    total_tasks: usize,
+    total_time_secs: f64,
+    total_time_ms: f64,
+    avg_time_ms: f64,
+    throughput: f64,
+) {
     let metrics_content = format!(
         "Total tasks processed: {}\nTotal execution time: {:.2} seconds ({:.2} ms)\nAverage time per task: {:.2} ms\nThroughput: {:.2} tasks/second\n",
         total_tasks, total_time_secs, total_time_ms, avg_time_ms, throughput
     );
-    
+
     if let Err(e) = std::fs::write("results/evaluation_metrics.txt", metrics_content) {
         eprintln!("Failed to write evaluation metrics to file: {}", e);
     } else {
         println!("Evaluation metrics written to results/evaluation_metrics.txt");
     }
 }
-

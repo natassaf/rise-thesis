@@ -4,16 +4,18 @@ use actix_web::web;
 use async_trait::async_trait;
 use rayon::prelude::*;
 
-use crate::api::api_objects::{SubmittedJobs, Job};
-use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction::predict_memory_batch;
-use crate::optimized_scheduling_preprocessing::features_extractor::{build_all_features, TaskBoundType};
-use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction_utils::MemoryFeatures;
+use crate::api::api_objects::{Job, SubmittedJobs};
 use crate::optimized_scheduling_preprocessing::execution_time_prediction::time_prediction::predict_time_batch;
+use crate::optimized_scheduling_preprocessing::features_extractor::{
+    TaskBoundType, build_all_features,
+};
+use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction::predict_memory_batch;
+use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction_utils::MemoryFeatures;
 
 /// Check how many jobs have changed index after sorting
 fn count_jobs_with_changed_index(job_ids_before: &[String], job_ids_after: &[String]) -> usize {
     let mut changed_count = 0;
-    
+
     for (index, job_id) in job_ids_after.iter().enumerate() {
         if let Some(original_index) = job_ids_before.iter().position(|id| id == job_id) {
             if original_index != index {
@@ -21,12 +23,16 @@ fn count_jobs_with_changed_index(job_ids_before: &[String], job_ids_after: &[Str
             }
         }
     }
-    
+
     changed_count
 }
 
 /// Save debug information about memory features and prediction to a file
-fn save_debug_memory_prediction(job_id: &str, memory_features: &MemoryFeatures, memory_prediction: f64) {
+fn save_debug_memory_prediction(
+    job_id: &str,
+    memory_features: &MemoryFeatures,
+    memory_prediction: f64,
+) {
     let debug_filename = format!("results/debug_memory_prediction_{}.txt", job_id);
     let memory_features_vec = memory_features.to_vec();
     let debug_content = format!(
@@ -48,18 +54,19 @@ fn save_debug_memory_prediction(job_id: &str, memory_features: &MemoryFeatures, 
 }
 
 #[async_trait]
-pub trait SchedulerAlgorithm{
-    async fn prioritize_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>) -> (Vec<String>, Vec<String>);
+pub trait SchedulerAlgorithm {
+    async fn prioritize_tasks(
+        &self,
+        submitted_jobs: &web::Data<SubmittedJobs>,
+    ) -> (Vec<String>, Vec<String>);
 }
-
 
 #[derive(Clone)]
-pub struct BaselineStaticSchedulerAlgorithm{
-}
+pub struct BaselineStaticSchedulerAlgorithm {}
 
-impl BaselineStaticSchedulerAlgorithm{
+impl BaselineStaticSchedulerAlgorithm {
     pub fn new() -> Self {
-        Self{}
+        Self {}
     }
 
     // Sort jobs by arrival time (oldest first)
@@ -70,10 +77,13 @@ impl BaselineStaticSchedulerAlgorithm{
 }
 
 #[async_trait]
-impl SchedulerAlgorithm for BaselineStaticSchedulerAlgorithm{
-    async fn prioritize_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>) -> (Vec<String>, Vec<String>) {
+impl SchedulerAlgorithm for BaselineStaticSchedulerAlgorithm {
+    async fn prioritize_tasks(
+        &self,
+        submitted_jobs: &web::Data<SubmittedJobs>,
+    ) -> (Vec<String>, Vec<String>) {
         self.sort_by_arrival_time(submitted_jobs).await;
-        
+
         // Separate jobs into CPU-bound and I/O-bound task ID vectors (maintaining sort order)
         let mut first_hald_jobs: Vec<String> = Vec::new();
         let mut second_half_jobs: Vec<String> = Vec::new();
@@ -86,36 +96,44 @@ impl SchedulerAlgorithm for BaselineStaticSchedulerAlgorithm{
                 second_half_jobs.push(job.id.clone());
             }
         }
-        
+
         // Store separated task ID sets in SubmittedJobs
-        submitted_jobs.set_cpu_bound_task_ids(first_hald_jobs.clone()).await;
-        submitted_jobs.set_io_bound_task_ids(second_half_jobs.clone()).await;
-            
+        submitted_jobs
+            .set_cpu_bound_task_ids(first_hald_jobs.clone())
+            .await;
+        submitted_jobs
+            .set_io_bound_task_ids(second_half_jobs.clone())
+            .await;
+
         (first_hald_jobs, second_half_jobs)
     }
 }
 
-pub struct MemoryTimeAwareSchedulerAlgorithm{
-}
+pub struct MemoryTimeAwareSchedulerAlgorithm {}
 
-impl MemoryTimeAwareSchedulerAlgorithm{
+impl MemoryTimeAwareSchedulerAlgorithm {
     pub fn new() -> Self {
-        Self{}
+        Self {}
     }
 
     /// Extract features for all jobs in parallel using rayon
     fn extract_features_parallel(jobs: &[Job]) -> Vec<(String, Vec<f32>, Vec<f32>, TaskBoundType)> {
-        jobs
-            .par_iter()
+        jobs.par_iter()
             .map(|job| {
                 let cwasm_file = job.binary_path.replace(".wasm", ".cwasm");
                 let wat_file = job.binary_path.replace(".wasm", ".wat");
                 let payload = job.payload.clone();
                 let folder_to_mount = job.folder_to_mount.clone();
                 let job_id = job.id.clone();
-                
-                let (memory_features, time_features, task_bound_type) = build_all_features(&cwasm_file, &wat_file, &payload, &folder_to_mount);
-                (job_id, memory_features.to_vec(), time_features.to_vec(), task_bound_type)
+
+                let (memory_features, time_features, task_bound_type) =
+                    build_all_features(&cwasm_file, &wat_file, &payload, &folder_to_mount);
+                (
+                    job_id,
+                    memory_features.to_vec(),
+                    time_features.to_vec(),
+                    task_bound_type,
+                )
             })
             .collect()
     }
@@ -124,37 +142,43 @@ impl MemoryTimeAwareSchedulerAlgorithm{
     async fn process_predictions_in_batches(
         feature_results: &[(String, Vec<f32>, Vec<f32>, TaskBoundType)],
         batch_size: usize,
-    ) -> (HashMap<String, f64>, HashMap<String, f64>, HashMap<String, TaskBoundType>) {
+    ) -> (
+        HashMap<String, f64>,
+        HashMap<String, f64>,
+        HashMap<String, TaskBoundType>,
+    ) {
         let mut job_id_to_memory_prediction: HashMap<String, f64> = HashMap::new();
         let mut job_id_to_time_prediction: HashMap<String, f64> = HashMap::new();
         let mut job_id_to_task_bound_type: HashMap<String, TaskBoundType> = HashMap::new();
-        
+
         // Process in batches of BATCH_SIZE
         for batch_start in (0..feature_results.len()).step_by(batch_size) {
             let batch_end = std::cmp::min(batch_start + batch_size, feature_results.len());
             let batch = &feature_results[batch_start..batch_end];
-            
+
             // Collect features for this batch
             let mut batch_job_ids: Vec<String> = Vec::new();
             let mut memory_features_batch: Vec<Vec<f32>> = Vec::new();
             let mut time_features_batch: Vec<Vec<f32>> = Vec::new();
-            
+
             for (job_id, memory_features, time_features, task_bound_type) in batch {
                 batch_job_ids.push(job_id.clone());
                 memory_features_batch.push(memory_features.clone());
                 time_features_batch.push(time_features.clone());
                 job_id_to_task_bound_type.insert(job_id.clone(), *task_bound_type);
             }
-            
-            println!("Processing prediction batch {}/{} ({} jobs)", 
-                     batch_start / batch_size + 1, 
-                     (feature_results.len() + batch_size - 1) / batch_size,
-                     batch_job_ids.len());
-            
+
+            println!(
+                "Processing prediction batch {}/{} ({} jobs)",
+                batch_start / batch_size + 1,
+                (feature_results.len() + batch_size - 1) / batch_size,
+                batch_job_ids.len()
+            );
+
             // Run batch predictions
             let memory_predictions = predict_memory_batch(&memory_features_batch).await;
             let time_predictions = predict_time_batch(&time_features_batch).await;
-            
+
             // Store results
             for (i, job_id) in batch_job_ids.iter().enumerate() {
                 if i < memory_predictions.len() {
@@ -165,42 +189,68 @@ impl MemoryTimeAwareSchedulerAlgorithm{
                 }
             }
         }
-        
-        (job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type)
+
+        (
+            job_id_to_memory_prediction,
+            job_id_to_time_prediction,
+            job_id_to_task_bound_type,
+        )
     }
 }
 
 #[async_trait]
-impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
-    async fn prioritize_tasks(&self, submitted_jobs: &web::Data<SubmittedJobs>) -> (Vec<String>, Vec<String>) {
+impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm {
+    async fn prioritize_tasks(
+        &self,
+        submitted_jobs: &web::Data<SubmittedJobs>,
+    ) -> (Vec<String>, Vec<String>) {
         // Configuration: batch size for predictions
         const BATCH_SIZE: usize = 20;
-        
+
         // for each job predict memory and time requirements
         let jobs = submitted_jobs.get_jobs().await;
-        let job_ids_before: Vec<_> = submitted_jobs.get_jobs().await.iter().map(|job| job.id.clone()).collect();
-        
+        let job_ids_before: Vec<_> = submitted_jobs
+            .get_jobs()
+            .await
+            .iter()
+            .map(|job| job.id.clone())
+            .collect();
+
         if jobs.is_empty() {
             return (Vec::new(), Vec::new());
         }
-        
+
         // Measure total time for feature extraction and prediction
         let total_start = std::time::Instant::now();
-        
+
         // Extract features for all jobs in parallel
         let feature_results = Self::extract_features_parallel(&jobs);
-        
+
         // Process predictions in batches
-        let (job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type) = 
+        let (job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type) =
             Self::process_predictions_in_batches(&feature_results, BATCH_SIZE).await;
-        
+
         let total_duration = total_start.elapsed();
-        let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        std::fs::write(format!("results/timing_{}.txt", timestamp), format!("Total time: {:.2}ms\nJobs: {}", total_duration.as_secs_f64() * 1000.0, jobs.len())).unwrap_or_else(|e| eprintln!("Failed to write timing: {:?}", e));
-        
-        println!("job_id_to_memory_prediction: {:?}", job_id_to_memory_prediction);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(
+            format!("results/timing_{}.txt", timestamp),
+            format!(
+                "Total time: {:.2}ms\nJobs: {}",
+                total_duration.as_secs_f64() * 1000.0,
+                jobs.len()
+            ),
+        )
+        .unwrap_or_else(|e| eprintln!("Failed to write timing: {:?}", e));
+
+        println!(
+            "job_id_to_memory_prediction: {:?}",
+            job_id_to_memory_prediction
+        );
         println!("job_id_to_time_prediction: {:?}", job_id_to_time_prediction);
-        
+
         // Update jobs with memory, time predictions, and task bound type in parallel
         let mut jobs = submitted_jobs.jobs.lock().await;
         jobs.par_iter_mut().for_each(|job| {
@@ -214,7 +264,7 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
                 job.task_bound_type = Some(*bound_type);
             }
         });
-        
+
         // Sort jobs:
         // 1. First by execution time from largest to shortest (descending)
         // 2. Then by memory prediction from shortest to largest (ascending)
@@ -224,37 +274,43 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
             let b_time = b.execution_time_prediction.unwrap_or(0.0);
             let a_mem = a.memory_prediction.unwrap_or(0.0);
             let b_mem = b.memory_prediction.unwrap_or(0.0);
-            
+
             // First sort by execution time: descending (largest first, shortest last)
             match b_time.partial_cmp(&a_time) {
                 Some(std::cmp::Ordering::Equal) => {
                     // If execution times are equal, sort by memory: ascending (smallest first, largest last)
-                    a_mem.partial_cmp(&b_mem).unwrap_or(std::cmp::Ordering::Equal)
+                    a_mem
+                        .partial_cmp(&b_mem)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 }
                 Some(ordering) => ordering,
                 None => std::cmp::Ordering::Equal,
             }
         });
-        
+
         // Use the jobs we already have locked instead of calling get_jobs() again
         let job_ids_after: Vec<_> = jobs.iter().map(|job| job.id.clone()).collect();
-        
+
         // Sanity check: how many jobs have changed index after sorting
         let changed_count = count_jobs_with_changed_index(&job_ids_before, &job_ids_after);
-        println!("[ORDER CHECK] Jobs with changed index: {} / {}", changed_count, job_ids_before.len());
-        
+        println!(
+            "[ORDER CHECK] Jobs with changed index: {} / {}",
+            changed_count,
+            job_ids_before.len()
+        );
+
         // Separate jobs into CPU-bound and I/O-bound task ID vectors (maintaining sort order)
         let mut cpu_bound_task_ids: Vec<String> = Vec::new();
         let mut io_bound_task_ids: Vec<String> = Vec::new();
-        
+
         for job in jobs.iter() {
             match job.task_bound_type {
                 Some(TaskBoundType::CpuBound) => {
                     cpu_bound_task_ids.push(job.id.clone());
-                },
+                }
                 Some(TaskBoundType::IoBound) => {
                     io_bound_task_ids.push(job.id.clone());
-                },
+                }
                 _ => {
                     // For Mixed or None, we can decide based on heuristics or add to both
                     // For now, let's add Mixed tasks to CPU-bound as a default
@@ -262,16 +318,22 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm{
                 }
             }
         }
-        
+
         // Store separated task ID sets in SubmittedJobß
-        submitted_jobs.set_cpu_bound_task_ids(cpu_bound_task_ids.clone()).await;
-        submitted_jobs.set_io_bound_task_ids(io_bound_task_ids.clone()).await;
-        
-        println!("[TASK SEPARATION] CPU-bound tasks: {}, I/O-bound tasks: {}", cpu_bound_task_ids.len(), io_bound_task_ids.len());
-        
+        submitted_jobs
+            .set_cpu_bound_task_ids(cpu_bound_task_ids.clone())
+            .await;
+        submitted_jobs
+            .set_io_bound_task_ids(io_bound_task_ids.clone())
+            .await;
+
+        println!(
+            "[TASK SEPARATION] CPU-bound tasks: {}, I/O-bound tasks: {}",
+            cpu_bound_task_ids.len(),
+            io_bound_task_ids.len()
+        );
+
         // Return the separated task ID vectors
         (io_bound_task_ids, cpu_bound_task_ids)
     }
-    
 }
-

@@ -1,15 +1,15 @@
+use crate::optimized_scheduling_preprocessing::features_extractor::TaskBoundType;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::optimized_scheduling_preprocessing::features_extractor::TaskBoundType;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ExecuteTasksRequest{
+pub struct ExecuteTasksRequest {
     pub scheduling_algorithm: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct WasmJobRequest{
+pub struct WasmJobRequest {
     binary_name: String,
     func_name: String,
     payload: String,
@@ -23,9 +23,8 @@ pub struct TaskQuery {
     pub id: String,
 }
 
-
-#[derive(Debug, Clone)]
-pub struct Job{
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Job {
     pub binary_path: String,
     pub func_name: String,
     pub payload: String,
@@ -45,7 +44,7 @@ impl From<WasmJobRequest> for Job {
         let binary_path = format!("wasm-modules/{}", request.binary_name);
         // DON'T decompress here - do it in the worker to avoid blocking the handler
         // This prevents connection timeouts when handling large compressed payloads
-        
+
         Job {
             binary_path,
             func_name: request.func_name,
@@ -53,7 +52,7 @@ impl From<WasmJobRequest> for Job {
             payload_compressed: request.payload_compressed, // Remember if it needs decompression
             id: request.task_id,
             folder_to_mount: "models/".to_string() + &request.model_folder_name,
-            status:"waiting".to_string(),
+            status: "waiting".to_string(),
             arrival_time: std::time::SystemTime::now(), // Record arrival time for sorting
             memory_prediction: None,
             execution_time_prediction: None,
@@ -62,7 +61,6 @@ impl From<WasmJobRequest> for Job {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct SubmittedJobs {
     pub jobs: Arc<Mutex<Vec<Job>>>,
@@ -70,12 +68,12 @@ pub struct SubmittedJobs {
     pub cpu_bound_task_ids: Arc<Mutex<std::collections::HashSet<String>>>, // CPU-bound task IDs set
 }
 
-impl SubmittedJobs{
-    pub fn new()->Self{
+impl SubmittedJobs {
+    pub fn new() -> Self {
         let tasks = Arc::new(Mutex::new(vec![]));
         let io_bound_set = Arc::new(Mutex::new(std::collections::HashSet::new()));
         let cpu_bound_set = Arc::new(Mutex::new(std::collections::HashSet::new()));
-        Self{
+        Self {
             jobs: tasks,
             io_bound_task_ids: io_bound_set,
             cpu_bound_task_ids: cpu_bound_set,
@@ -99,12 +97,12 @@ impl SubmittedJobs{
         jobs.retain(|job| job.id != job_id);
     }
 
-    pub async fn get_num_tasks(&self)->usize{
+    pub async fn get_num_tasks(&self) -> usize {
         let guard = self.jobs.lock().await;
         guard.len()
     }
-    
-    pub async fn get_jobs(&self)->Vec<Job>{
+
+    pub async fn get_jobs(&self) -> Vec<Job> {
         self.jobs.lock().await.to_vec()
     }
 
@@ -165,6 +163,4 @@ impl SubmittedJobs{
         let mut guard = self.jobs.lock().await;
         guard.push(task);
     }
-
 }
-

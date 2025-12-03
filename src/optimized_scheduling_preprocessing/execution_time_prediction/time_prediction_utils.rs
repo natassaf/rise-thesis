@@ -1,5 +1,4 @@
-
-pub enum TaskBoundType{
+pub enum TaskBoundType {
     IOBounded,
     CPUBounded,
 }

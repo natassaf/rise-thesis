@@ -2,7 +2,7 @@
 pub struct MemoryFeatures {
     // Binary identification
     pub binary_name: String,
-    
+
     // Size analysis
     pub binary_size_bytes: u64,
     pub data_section_size_bytes: u64,
@@ -55,7 +55,7 @@ impl MemoryFeatures {
             is_ml_workload: false,
             request_payload_size: 0,
             model_file_size: 0,
-            payload: 0
+            payload: 0,
         }
     }
 
@@ -71,7 +71,7 @@ impl MemoryFeatures {
     pub fn to_vec(&self) -> Vec<f32> {
         let binary_name_hash = Self::hash_binary_name(&self.binary_name);
         vec![
-            binary_name_hash,  // binary_name encoded as hash (feature 0) - matches Python abs(hash(x))
+            binary_name_hash, // binary_name encoded as hash (feature 0) - matches Python abs(hash(x))
             self.binary_size_bytes as f32,
             self.data_section_size_bytes as f32,
             self.import_count as f32,

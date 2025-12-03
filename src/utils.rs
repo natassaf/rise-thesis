@@ -1,6 +1,3 @@
-
-
-
 // #[derive(Serialize, Deserialize, Debug, Clone, Encode)]
 // #[serde(untagged)]
 // pub enum Input {
@@ -50,20 +47,17 @@
 //     }
 // }
 
-
 use std::fs::{self, File};
 use std::io::{self, BufWriter, ErrorKind};
-
 
 /// Decompress gzip result data
 fn decompress_gzip_result(compressed_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
     use flate2::read::GzDecoder;
     use std::io::Read;
-    
+
     let mut decoder = GzDecoder::new(compressed_data);
     let mut decompressed = String::new();
     decoder.read_to_string(&mut decompressed)?;
-    
+
     Ok(decompressed)
 }
-

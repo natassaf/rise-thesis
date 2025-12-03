@@ -1,16 +1,15 @@
-
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
+use wasmtime::component::{Component, Func, Linker, Val};
 use wasmtime::*;
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::p2::{self, IoView, WasiCtx, WasiCtxBuilder, WasiView};
-use wasmtime_wasi_nn::wit::{add_to_linker as add_wasi_nn};
-use wasmtime_wasi_nn::wit::{ WasiNnCtx, WasiNnView};
-use wasmtime::component::{Component, Func, Linker, Val};
-use wasmtime_wasi_nn::{InMemoryRegistry, Registry};
-use wasmtime_wasi_nn::Backend;
 use wasmtime_wasi::{DirPerms, FilePerms};
+use wasmtime_wasi_nn::Backend;
 use wasmtime_wasi_nn::backend::onnx::OnnxBackend;
+use wasmtime_wasi_nn::wit::add_to_linker as add_wasi_nn;
+use wasmtime_wasi_nn::wit::{WasiNnCtx, WasiNnView};
+use wasmtime_wasi_nn::{InMemoryRegistry, Registry};
 
 // pub struct ModuleWasmLoader{
 //     engine:Engine,
@@ -47,7 +46,6 @@ use wasmtime_wasi_nn::backend::onnx::OnnxBackend;
 //         Self {engine, store, linker:None}
 //     }
 
-    
 //     pub fn load<I:WasmParams, O:WasmResults>(&mut self, path_to_module:String, func_name:String)->(TypedFunc<I, O>, Memory ){
 //         let module = Module::from_file(&self.engine, path_to_module).unwrap();
 //         let instance = Instance::new(&mut self.store, &module, &[]).unwrap();
@@ -86,9 +84,8 @@ impl IoView for HostState {
     }
 }
 
-
-pub struct WasmComponentLoader{
-    engine:Engine,
+pub struct WasmComponentLoader {
+    engine: Engine,
     //  pub store: Store<WasiP1Ctx>,
     store: Store<HostState>,
     linker: Linker<HostState>,
@@ -99,9 +96,8 @@ struct WasmResult {
     output: String,
 }
 
-
-impl WasmComponentLoader{
-    pub fn new(folder_to_mount:String)->Self{
+impl WasmComponentLoader {
+    pub fn new(folder_to_mount: String) -> Self {
         println!("Loading wasm component");
 
         // initialize engine
@@ -111,58 +107,69 @@ impl WasmComponentLoader{
 
         // initialize linker
         let mut linker: Linker<HostState> = Linker::new(&engine);
-        p2::add_to_linker_async(&mut linker).context("add_to_linker_async failed").unwrap();
+        p2::add_to_linker_async(&mut linker)
+            .context("add_to_linker_async failed")
+            .unwrap();
         // Add wasm-nn support
         add_wasi_nn(&mut linker, |host: &mut HostState| {
             HostState::wasi_nn_view(host)
-        }).context("failed to add wasi-nn to linker").unwrap();
-       let wasi = match folder_to_mount.as_str() {
-            "" => {WasiCtxBuilder::new()
-            .inherit_stdio()
-            .build()}
+        })
+        .context("failed to add wasi-nn to linker")
+        .unwrap();
+        let wasi = match folder_to_mount.as_str() {
+            "" => WasiCtxBuilder::new().inherit_stdio().build(),
             _ => {
                 // Canonicalize the path to ensure it's absolute and exists
-                let host_path = std::fs::canonicalize(&folder_to_mount)
-                    .unwrap_or_else(|e| {
-                        eprintln!("Warning: Failed to canonicalize path '{}': {}. Using as-is.", folder_to_mount, e);
-                        std::path::PathBuf::from(&folder_to_mount)
-                    });
-                
+                let host_path = std::fs::canonicalize(&folder_to_mount).unwrap_or_else(|e| {
+                    eprintln!(
+                        "Warning: Failed to canonicalize path '{}': {}. Using as-is.",
+                        folder_to_mount, e
+                    );
+                    std::path::PathBuf::from(&folder_to_mount)
+                });
+
                 // Use the same path for guest path so WASM code can access it with absolute paths
                 let host_path_str = host_path.to_string_lossy().to_string();
                 let guest_path = host_path_str.clone();
-                
-                println!("Preopening directory - host: '{}', guest: '{}'", host_path_str, guest_path);
-                
+
+                println!(
+                    "Preopening directory - host: '{}', guest: '{}'",
+                    host_path_str, guest_path
+                );
+
                 // Verify the directory exists before preopening
                 if !std::path::Path::new(&host_path_str).exists() {
-                    eprintln!("ERROR: Directory '{}' does not exist! Cannot preopen.", host_path_str);
+                    eprintln!(
+                        "ERROR: Directory '{}' does not exist! Cannot preopen.",
+                        host_path_str
+                    );
                 }
-                
+
                 WasiCtxBuilder::new()
                     .inherit_stdio()
                     .preopened_dir(
-                        host_path_str.clone(),   // host path (canonicalized absolute path)
-                        guest_path.clone(),      // guest path (same as host so WASM can use absolute paths)
+                        host_path_str.clone(), // host path (canonicalized absolute path)
+                        guest_path.clone(), // guest path (same as host so WASM can use absolute paths)
                         DirPerms::READ,
                         FilePerms::READ,
                     )
                     .unwrap_or_else(|e| {
-                        eprintln!("ERROR: Failed to preopen directory '{}': {}", host_path_str, e);
+                        eprintln!(
+                            "ERROR: Failed to preopen directory '{}': {}",
+                            host_path_str, e
+                        );
                         panic!("Failed to preopen directory: {}", e);
                     })
                     .build()
-            }};
-
-
+            }
+        };
 
         // Initialize ONNX backend
         let onnx_backend = Backend::from(OnnxBackend::default());
-        
-        
+
         let my_registry = InMemoryRegistry::new();
         let registry = Registry::from(my_registry);
-        
+
         // Create the WasiNnCtx with the ONNX backend
         let wasi_nn = WasiNnCtx::new(vec![onnx_backend], registry);
 
@@ -175,35 +182,49 @@ impl WasmComponentLoader{
             },
         );
 
-        Self {engine, store, linker}
+        Self {
+            engine,
+            store,
+            linker,
+        }
     }
 
-    pub async fn load_func(&mut self, wasm_component_path:String, func_name:String)->Func{
+    pub async fn load_func(&mut self, wasm_component_path: String, func_name: String) -> Func {
         let component = Component::from_file(&self.engine, wasm_component_path.clone())
-        .with_context(|| format!("failed to compile component at {:?}", wasm_component_path)).unwrap();
+            .with_context(|| format!("failed to compile component at {:?}", wasm_component_path))
+            .unwrap();
 
         // 4) Instantiate
-        let instance = self.linker.instantiate_async(&mut self.store, &component)
-        .await
-        .context("instantiate_async failed").unwrap();
+        let instance = self
+            .linker
+            .instantiate_async(&mut self.store, &component)
+            .await
+            .context("instantiate_async failed")
+            .unwrap();
 
         // 5) Lookup exported function by its world export name (usually the same as in the WIT).
         let func: Func = instance
             .get_func(&mut self.store, &func_name)
-            .ok_or_else(|| anyhow!("exported function `{func_name}` not found")).unwrap();
+            .ok_or_else(|| anyhow!("exported function `{func_name}` not found"))
+            .unwrap();
 
         return func;
     }
 
-    pub async fn run_func(&mut self, input:Vec<Val>, func:Func)->Result<Vec<Val>, anyhow::Error>{
+    pub async fn run_func(
+        &mut self,
+        input: Vec<Val>,
+        func: Func,
+    ) -> Result<Vec<Val>, anyhow::Error> {
         let results_len = func.results(&self.store).len();
-        
+
         // Initialize with empty string for WasmResult output
         let mut results = vec![Val::String("".into()); results_len];
 
         let input_args = input;
-        func.call_async(&mut self.store, &input_args, &mut results).await?;
+        func.call_async(&mut self.store, &input_args, &mut results)
+            .await?;
         // println!("load result {:?}", results);
-        return Ok(results)
+        return Ok(results);
     }
 }
