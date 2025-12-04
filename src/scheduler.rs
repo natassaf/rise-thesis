@@ -58,7 +58,6 @@ impl SchedulerEngine {
         let worker_txs: Vec<_> = (0..num_workers_to_start)
             .map(|_| worker_tx.clone())
             .collect();
-        let scheduler_channel_tx = Arc::new(Mutex::new(worker_txs.clone()));
 
         // Create workers - each worker gets its own WasmComponentLoader instance
         // This allows parallel execution without mutex contention
@@ -252,6 +251,7 @@ impl SchedulerEngine {
                 {
                     // Check if all tasks are completed
                     let to_worker_msg = if self.evaluation_metrics.are_all_tasks_completed().await{
+                        println!("Sending termination message");
                         ToWorkerMessage {
                             status: JobAskStatus::Terminate,
                             job: Job {
@@ -329,6 +329,7 @@ impl SchedulerEngine {
             }
         }
         let should_terminate = self.check_for_termination().await;
+        println!("Should terminate {}", should_terminate);
         if should_terminate{
             println!("Scheduler: All tasks completed! Sending termination messages to all workers...");
             // drop(scheduler_txs);
@@ -364,7 +365,8 @@ impl SchedulerEngine {
                 message_type: MessageType::ToWorkerMessage,
             };
             let worker_ids:Vec<usize> = self.workers.iter().map(|w| w.worker_id).collect();
-            self.send_message(&worker_ids, &terminate_message);
+            let _res = self.send_message(&worker_ids, &terminate_message).await;
+            self.evaluation_metrics.reset().await;
         }
         Ok(())
     }
@@ -399,7 +401,6 @@ impl SchedulerEngine {
 
         // Start loop to receive messages from workers
         let mut rx = self.scheduler_channel_rx.lock().await;
-        let mut message_count = 0u32;
         let mut counter = 0;
         loop {
             // Receive message from a worker
@@ -417,7 +418,7 @@ impl SchedulerEngine {
                     //         total_tasks, completed_count, jobs_in_submitted
                     //     );
                     // }
-                    self.handle_incoming_message(message_type, message).await;
+                    let _res = self.handle_incoming_message(message_type, message).await;
                 } 
                 None => {
                     println!("Scheduler: Channel closed, exiting message loop");

@@ -228,7 +228,7 @@ impl Worker {
         let completed_count = evaluation_metrics.get_completed_count().await;
         let total_tasks = evaluation_metrics.get_total_tasks().await;
 
-        if completed_count > 0 && completed_count == total_tasks {
+        if self.evaluation_metrics.are_all_tasks_completed().await {
             let throughput = evaluation_metrics
                 .calculate_throughput(completion_time, total_tasks)
                 .await;
@@ -263,8 +263,6 @@ impl Worker {
                 throughput,
             );
 
-            // Reset timing for next execution
-            evaluation_metrics.reset().await;
         }
     }
 
@@ -340,6 +338,7 @@ impl Worker {
                                             "Worker {}: Received terminate message from scheduler",
                                             self.worker_id
                                         );
+                                        self.shutdown().await;
                                         break;
                                     }
                                     JobAskStatus::NotFound => {
@@ -396,79 +395,77 @@ impl Worker {
         );
         return tasks;
     }
+
     pub async fn start(&self) {
         println!(
             "Worker: {:?} started on core id : {:?}",
             self.worker_id, self.core_id
         );
+        
+        // Wait for signal to start processing (from execute_jobs endpoint)
+        self.execution_notify.notified().await;
+
+        println!("Worker {}: Starting to process tasks", self.worker_id);
+        let mut request_flag = false;
+        let mut tasks_to_process: Vec<Job> = Vec::new();
+
+        
         loop {
             // Check for shutdown signal
-            if *self.shutdown_flag.lock().await {
+            let mut flag = self.shutdown_flag.lock().await;
+            if *flag {
                 println!("Worker: {:?} shutting down", self.worker_id);
-                break;
+                *flag = false;
+                return;
             }
 
-            // Wait for signal to start processing (from execute_jobs endpoint)
-            self.execution_notify.notified().await;
+            // Request tasks based on num_concurrent_tasks
+            if self.num_concurrent_tasks == 1
+                && request_flag == false
+                && tasks_to_process.is_empty()
+            {
+                self.request_tasks(JobType::Mixed).await;
+                request_flag = true;
+            } else if self.num_concurrent_tasks == 2
+                && request_flag == false
+                && tasks_to_process.is_empty()
+            {
+                self.request_tasks(JobType::IOBound).await;
+                self.request_tasks(JobType::CPUBound).await;
+                request_flag = true;
+            }
 
-            println!("Worker {}: Starting to process tasks", self.worker_id);
-            let mut request_flag = false;
-            let mut tasks_to_process: Vec<Job> = Vec::new();
-            loop {
-                // Check for shutdown signal
-                if *self.shutdown_flag.lock().await {
-                    println!("Worker: {:?} shutting down", self.worker_id);
-                    return;
+            tasks_to_process = self.receive_tasks().await;
+
+            // Handle empty tasks
+            if tasks_to_process.is_empty() {
+                request_flag = false;
+                if self.evaluation_metrics.are_all_tasks_completed().await {
+                    println!("Worker {}: All tasks completed, exiting", self.worker_id);
+                    break;
                 }
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                continue;
+            }
 
-                // Request tasks based on num_concurrent_tasks
-                if self.num_concurrent_tasks == 1
-                    && request_flag == false
-                    && tasks_to_process.is_empty()
-                {
-                    self.request_tasks(JobType::Mixed).await;
-                    request_flag = true;
-                } else if self.num_concurrent_tasks == 2
-                    && request_flag == false
-                    && tasks_to_process.is_empty()
-                {
-                    self.request_tasks(JobType::IOBound).await;
-                    self.request_tasks(JobType::CPUBound).await;
-                    request_flag = true;
-                }
-
-                tasks_to_process = self.receive_tasks().await;
-
-                // Handle empty tasks
-                if tasks_to_process.is_empty() {
+            // Process tasks based on count
+            match tasks_to_process.len() {
+                1 => {
+                    self.run_task(tasks_to_process.pop().unwrap()).await;
                     request_flag = false;
-                    if self.evaluation_metrics.are_all_tasks_completed().await {
-                        println!("Worker {}: All tasks completed, exiting", self.worker_id);
-                        break;
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                    continue;
                 }
-
-                // Process tasks based on count
-                match tasks_to_process.len() {
-                    1 => {
-                        self.run_task(tasks_to_process.pop().unwrap()).await;
-                        request_flag = false;
+                2 => {
+                    let task_2 = tasks_to_process.pop().unwrap();
+                    let task_1 = tasks_to_process.pop().unwrap();
+                    tokio::join!(self.run_task(task_1), self.run_task(task_2));
+                    request_flag = false;
+                }
+                _ => {
+                    for _ in 0..tasks_to_process.len() {
+                        let task = tasks_to_process.pop().unwrap();
+                        self.run_task(task).await;
                     }
-                    2 => {
-                        let task_2 = tasks_to_process.pop().unwrap();
-                        let task_1 = tasks_to_process.pop().unwrap();
-                        tokio::join!(self.run_task(task_1), self.run_task(task_2));
-                        request_flag = false;
-                    }
-                    _ => {
-                        for _ in 0..tasks_to_process.len() {
-                            let task = tasks_to_process.pop().unwrap();
-                            self.run_task(task).await;
-                        }
-                        request_flag = false;
-                    }
+                    request_flag = false;
                 }
             }
         }
