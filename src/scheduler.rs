@@ -21,7 +21,7 @@ pub struct SchedulerEngine {
     workers: Vec<Arc<Worker>>,
     scheduler_channel_rx: Arc<Mutex<mpsc::Receiver<(MessageType, Message)>>>, // Channel for workers messages to send to scheduler. Worker channels are cloned
     scheduler_txs: Arc<Mutex<Vec<mpsc::Sender<(MessageType, Message)>>>>, // Senders to send messages to workers
-    execution_notify: Arc<Notify>, // Signal to workers to start processing
+    workers_notification_channel: Arc<Notify>, // Signal to workers to start processing
     evaluation_metrics: Arc<EvaluationMetrics>, // Evaluation metrics storage
     pin_cores: bool,
 }
@@ -33,10 +33,8 @@ impl SchedulerEngine {
         num_workers_to_start: usize,
         pin_cores: bool,
         num_concurrent_tasks: usize,
+        workers_notification_channel:Arc<Notify>   
     ) -> Self {
-        // Create a notification mechanism to signal workers when to process tasks
-        let execution_notify = Arc::new(Notify::new());
-
         // Create shared evaluation metrics
         let evaluation_metrics = Arc::new(EvaluationMetrics::new());
 
@@ -76,7 +74,7 @@ impl SchedulerEngine {
                     worker_wasm_loader,
                     worker_txs[i].clone(),
                     worker_rxs.remove(0),
-                    execution_notify.clone(),
+                    workers_notification_channel.clone(),
                     evaluation_metrics.clone(),
                     num_concurrent_tasks,
                 ))
@@ -88,7 +86,7 @@ impl SchedulerEngine {
             workers,
             scheduler_channel_rx,
             scheduler_txs: Arc::new(Mutex::new(scheduler_txs)),
-            execution_notify,
+            workers_notification_channel,
             evaluation_metrics,
             pin_cores,
         }
@@ -236,57 +234,69 @@ impl SchedulerEngine {
     pub async fn encode_response(&self, job:Option<Job>, to_scheduler_msg:&ToSchedulerMessage)-> Message{
         match job{
             Some(this_job)=> {
-                let to_worker_msg = ToWorkerMessage{
-                            status: JobAskStatus::Found,
-                            job:this_job,
-                            job_type: to_scheduler_msg.job_type.clone()};
-                let response_json = serde_json::to_string(&to_worker_msg).unwrap();
-                let response_message = Message {
-                    message: response_json,
-                    message_type: MessageType::ToWorkerMessage,
-                };
-                response_message
-                },
+                // Only send job if execution has started
+                if self.evaluation_metrics.get_execution_start_time().is_none() {
+                    // Execution not started yet, don't send job - it would be skipped and lost
+                    println!("Scheduler: Execution not started yet, re-adding job {} to avoid loss", this_job.id);
+                    // Re-add job to the list (it was already removed, so we need to add it back)
+                    self.submitted_jobs.add_task(this_job.clone()).await;
+                    // Return NotFound so worker can retry later
+                    let to_worker_msg = ToWorkerMessage {
+                        status: JobAskStatus::NotFound,
+                        job: Job {
+                            id: String::new(),
+                            binary_path: String::new(),
+                            func_name: String::new(),
+                            payload: String::new(),
+                            payload_compressed: false,
+                            folder_to_mount: String::new(),
+                            status: String::new(),
+                            arrival_time: std::time::SystemTime::now(),
+                            memory_prediction: None,
+                            execution_time_prediction: None,
+                            task_bound_type: None,
+                        },
+                        job_type: to_scheduler_msg.job_type.clone(),
+                    };
+                    let response_json = serde_json::to_string(&to_worker_msg).unwrap();
+                    Message {
+                        message: response_json,
+                        message_type: MessageType::ToWorkerMessage,
+                    }
+                } else {
+                    let to_worker_msg = ToWorkerMessage{
+                                status: JobAskStatus::Found,
+                                job:this_job,
+                                job_type: to_scheduler_msg.job_type.clone()};
+                    let response_json = serde_json::to_string(&to_worker_msg).unwrap();
+                    let response_message = Message {
+                        message: response_json,
+                        message_type: MessageType::ToWorkerMessage,
+                    };
+                    response_message
+                }
+            },
             None=>{
                 {
-                    // Check if all tasks are completed
-                    let to_worker_msg = if self.evaluation_metrics.are_all_tasks_completed().await{
-                        println!("Sending termination message");
-                        ToWorkerMessage {
-                            status: JobAskStatus::Terminate,
-                            job: Job {
-                                id: String::new(),
-                                binary_path: String::new(),
-                                func_name: String::new(),
-                                payload: String::new(),
-                                payload_compressed: false,
-                                folder_to_mount: String::new(),
-                                status: String::new(),
-                                arrival_time: std::time::SystemTime::now(),
-                                memory_prediction: None,
-                                execution_time_prediction: None,
-                                task_bound_type: None,
-                            },
-                            job_type: to_scheduler_msg.job_type.clone(),
-                        }
-                    } else {
-                        ToWorkerMessage {
-                            status: JobAskStatus::NotFound,
-                            job: Job {
-                                id: String::new(),
-                                binary_path: String::new(),
-                                func_name: String::new(),
-                                payload: String::new(),
-                                payload_compressed: false,
-                                folder_to_mount: String::new(),
-                                status: String::new(),
-                                arrival_time: std::time::SystemTime::now(),
-                                memory_prediction: None,
-                                execution_time_prediction: None,
-                                task_bound_type: None,
-                            },
-                            job_type: to_scheduler_msg.job_type.clone(),
-                        }
+                    // No job found - just return NotFound
+                    // Don't check for termination here because jobs might still be in-flight with workers
+                    // Termination will be checked after task completion in handle_incoming_message
+                    let to_worker_msg = ToWorkerMessage {
+                        status: JobAskStatus::NotFound,
+                        job: Job {
+                            id: String::new(),
+                            binary_path: String::new(),
+                            func_name: String::new(),
+                            payload: String::new(),
+                            payload_compressed: false,
+                            folder_to_mount: String::new(),
+                            status: String::new(),
+                            arrival_time: std::time::SystemTime::now(),
+                            memory_prediction: None,
+                            execution_time_prediction: None,
+                            task_bound_type: None,
+                        },
+                        job_type: to_scheduler_msg.job_type.clone(),
                     };
                     let response_json = serde_json::to_string(&to_worker_msg).unwrap();
                     let response_message = Message {
@@ -315,6 +325,45 @@ impl SchedulerEngine {
         all_completed
     }
 
+    pub async fn start_workers(&self){
+        self.workers_notification_channel.notify_waiters(); 
+    }
+
+    pub async fn send_termination_message(&self)->Result<(), Error>{
+        let terminate_msg = ToWorkerMessage {
+            status: JobAskStatus::Terminate,
+            job: Job {
+                id: String::new(),
+                binary_path: String::new(),
+                func_name: String::new(),
+                payload: String::new(),
+                payload_compressed: false,
+                folder_to_mount: String::new(),
+                status: String::new(),
+                arrival_time: std::time::SystemTime::now(),
+                memory_prediction: None,
+                execution_time_prediction: None,
+                task_bound_type: None,
+            },
+            job_type: JobType::None,
+        };
+        
+        let terminate_json = match serde_json::to_string(&terminate_msg) {
+            Ok(json) => json,
+            Err(e) => {
+                eprintln!("Scheduler: Failed to serialize termination message: {}", e);
+                return Err(anyhow::Error::msg("Serialization error"));
+            }
+        };
+        let terminate_message = Message {
+            message: terminate_json,
+            message_type: MessageType::ToWorkerMessage,
+        };
+        let worker_ids:Vec<usize> = self.workers.iter().map(|w| w.worker_id).collect();
+        let _res = self.send_message(&worker_ids, &terminate_message).await;
+        Ok(())
+    }
+
     pub async fn handle_incoming_message(&self, message_type: MessageType, message: Message) -> Result<(), Error> {
         match message_type {
             MessageType::ToSchedulerMessage => {
@@ -328,63 +377,32 @@ impl SchedulerEngine {
 
             }
         }
+        // Only check for termination after handling a message (not when no job is found)
+        // This ensures we don't terminate prematurely when jobs are still in-flight with workers
         let should_terminate = self.check_for_termination().await;
-        println!("Should terminate {}", should_terminate);
-        if should_terminate{
+        if should_terminate {
+            let completed_count = self.evaluation_metrics.get_completed_count().await;
+            let total_tasks = self.evaluation_metrics.get_total_tasks().await;
+            println!("Scheduler: Termination check - completed: {}, total: {}, match: {}", 
+                     completed_count, total_tasks, completed_count == total_tasks);
             println!("Scheduler: All tasks completed! Sending termination messages to all workers...");
-            // drop(scheduler_txs);
-            // let scheduler_txs = self.scheduler_txs.lock().await;
 
-            let terminate_msg = ToWorkerMessage {
-                status: JobAskStatus::Terminate,
-                job: Job {
-                    id: String::new(),
-                    binary_path: String::new(),
-                    func_name: String::new(),
-                    payload: String::new(),
-                    payload_compressed: false,
-                    folder_to_mount: String::new(),
-                    status: String::new(),
-                    arrival_time: std::time::SystemTime::now(),
-                    memory_prediction: None,
-                    execution_time_prediction: None,
-                    task_bound_type: None,
-                },
-                job_type: JobType::None,
-            };
+
+            self.send_termination_message().await?;
             
-            let terminate_json = match serde_json::to_string(&terminate_msg) {
-                Ok(json) => json,
-                Err(e) => {
-                    eprintln!("Scheduler: Failed to serialize termination message: {}", e);
-                    return Err(anyhow::Error::msg("Serialization error"));
-                }
-            };
-            let terminate_message = Message {
-                message: terminate_json,
-                message_type: MessageType::ToWorkerMessage,
-            };
-            let worker_ids:Vec<usize> = self.workers.iter().map(|w| w.worker_id).collect();
-            let _res = self.send_message(&worker_ids, &terminate_message).await;
             self.evaluation_metrics.reset().await;
         }
         Ok(())
     }
 
-    pub async fn start(&mut self) {
+    pub async fn initialize_execution(&self) {
         // Record start time
         let start_time = std::time::Instant::now();
         self.evaluation_metrics.set_execution_start_time(start_time);
 
         let jobs = self.submitted_jobs.get_jobs().await;
-        let task_ids: Vec<String> = jobs.iter().map(|j| j.id.clone()).collect();
-        println!(
-            "Scheduler: Initializing task status with {} task IDs",
-            task_ids.len()
-        );
-        self.evaluation_metrics
-            .initialize_task_status(task_ids)
-            .await;
+
+
 
         // Verify initialization worked
         let total_after_init = self.evaluation_metrics.get_total_tasks().await;
@@ -394,10 +412,11 @@ impl SchedulerEngine {
             jobs.len(),
             total_after_init
         );
+    }
 
-        // Notify all workers to start asking for jobs
-        self.execution_notify.notify_waiters();
-        println!("=== Notified workers to start requesting tasks ===");
+    pub async fn start(&mut self) {
+        // Initialize execution (will be called again when handle_execute_tasks is called with new jobs)
+        self.initialize_execution().await;
 
         // Start loop to receive messages from workers
         let mut rx = self.scheduler_channel_rx.lock().await;
@@ -408,16 +427,6 @@ impl SchedulerEngine {
             counter += 1;
             match rx.recv().await {
                 Some((message_type, message)) => {
-                    // message_count += 1;
-                    // if message_count % 10 == 0 {
-                    //     let total_tasks = self.evaluation_metrics.get_total_tasks().await;
-                    //     let completed_count = self.evaluation_metrics.get_completed_count().await;
-                    //     let jobs_in_submitted = self.submitted_jobs.get_num_tasks().await;
-                    //     println!(
-                    //         "Scheduler: Total tasks in metrics: {}, Completed: {}, Jobs in submitted_jobs: {}",
-                    //         total_tasks, completed_count, jobs_in_submitted
-                    //     );
-                    // }
                     let _res = self.handle_incoming_message(message_type, message).await;
                 } 
                 None => {
@@ -426,6 +435,10 @@ impl SchedulerEngine {
                 }
             }
         }
+    }
+
+    pub fn get_evaluation_metrics(&self) -> Arc<EvaluationMetrics> {
+        self.evaluation_metrics.clone()
     }
 
     pub async fn shutdown(&mut self) {

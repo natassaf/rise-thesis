@@ -50,29 +50,36 @@ impl EvaluationMetrics {
         }
 
         let mut task_status = self.task_status.lock().await;
-        // Only initialize if the map is empty (first time)
-        if task_status.is_empty() {
-            for task_id in task_ids {
-                task_status.insert(task_id, 0); // 0 = not processed
-            }
-            println!(
-                "EvaluationMetrics: Initialized task status with {} tasks",
-                task_status.len()
-            );
-        } else {
-            // Map already has tasks, don't re-initialize
-            println!(
-                "EvaluationMetrics: Task status map already initialized with {} tasks, skipping re-initialization",
-                task_status.len()
-            );
+        let mut completed_count = self.completed_count.lock().await;
+        
+        // Always reset for new batch to avoid stale state
+        // Clear old tasks and reset completed count
+        let old_count = task_status.len();
+        task_status.clear();
+        *completed_count = 0;
+        
+        // Initialize with new tasks
+        for task_id in task_ids {
+            task_status.insert(task_id, 0); // 0 = not processed
         }
+        
+        println!(
+            "EvaluationMetrics: Initialized task status with {} new tasks (cleared {} old tasks)",
+            task_status.len(),
+            old_count
+        );
     }
 
-    pub async fn set_task_status(&self, task_id: String, status: u8) {
-        let mut task_status = self.task_status.lock().await;
-        task_status.insert(task_id, status);
+pub async fn set_task_status(&self, task_id: String, status: u8) {
+    let mut task_status = self.task_status.lock().await;
+    let was_already_completed = task_status.get(&task_id).copied() == Some(1);
+    task_status.insert(task_id, status);
+    
+    // Only increment if task wasn't already completed
+    if !was_already_completed && status == 1 {
         *self.completed_count.lock().await += 1;
     }
+}
 
     pub async fn get_completed_count(&self) -> usize {
         *self.completed_count.lock().await

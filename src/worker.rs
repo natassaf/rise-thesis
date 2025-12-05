@@ -33,7 +33,7 @@ pub struct Worker {
     worker_channel_rx: Arc<Mutex<mpsc::Receiver<(MessageType, Message)>>>,
     shutdown_flag: Arc<Mutex<bool>>,
     wasm_loader: Arc<Mutex<WasmComponentLoader>>,
-    execution_notify: Arc<Notify>, // Wait for signal to start processing
+   workers_notification_channel: Arc<Notify>, // Wait for signal to start processing
     evaluation_metrics: Arc<EvaluationMetrics>, // Reference to evaluation metrics
     num_concurrent_tasks: usize,
 }
@@ -51,7 +51,7 @@ impl Worker {
         wasm_loader: Arc<Mutex<WasmComponentLoader>>,
         worker_channel_tx: mpsc::Sender<(MessageType, Message)>,
         worker_channel_rx: mpsc::Receiver<(MessageType, Message)>,
-        execution_notify: Arc<Notify>,
+        workers_notification_channel: Arc<Notify>,
         evaluation_metrics: Arc<EvaluationMetrics>,
         num_concurrent_tasks: usize,
     ) -> Self {
@@ -64,7 +64,7 @@ impl Worker {
             worker_channel_rx,
             shutdown_flag,
             wasm_loader,
-            execution_notify,
+            workers_notification_channel,
             evaluation_metrics,
             num_concurrent_tasks,
         }
@@ -312,77 +312,71 @@ impl Worker {
         );
     }
 
-    pub async fn receive_tasks(&self) -> Vec<Job> {
+    pub async fn receive_tasks(&self) -> (bool, Vec<Job>) {
         let mut tasks = Vec::new();
         let mut rx = self.worker_channel_rx.lock().await;
-
-        while tasks.len() < self.num_concurrent_tasks {
-            // Wait for a message from the scheduler
-            match rx.recv().await {
-                Some((message_type, message)) => {
-                    match message_type {
-                        MessageType::ToWorkerMessage => {
-                            match serde_json::from_str::<ToWorkerMessage>(&message.message) {
-                                Ok(to_worker_msg) => match to_worker_msg.status {
-                                    JobAskStatus::Found => {
-                                        tasks.push(to_worker_msg.job);
-                                        println!(
-                                            "Worker {}: Received job from scheduler ({} of {})",
-                                            self.worker_id,
-                                            tasks.len(),
-                                            self.num_concurrent_tasks
-                                        );
-                                    }
-                                    JobAskStatus::Terminate => {
-                                        println!(
-                                            "Worker {}: Received terminate message from scheduler",
-                                            self.worker_id
-                                        );
-                                        self.shutdown().await;
-                                        break;
-                                    }
-                                    JobAskStatus::NotFound => {
-                                        println!(
-                                            "Worker {}: Job not found from scheduler",
-                                            self.worker_id
-                                        );
-                                        tokio::time::sleep(tokio::time::Duration::from_secs(1))
-                                            .await;
-                                        break;
-                                    }
-                                    JobAskStatus::OutofBoundsJob => {
-                                        println!(
-                                            "Worker {}: Out of bounds job from scheduler",
-                                            self.worker_id
-                                        );
-                                        break;
-                                    }
-                                },
-                                Err(e) => {
-                                    eprintln!(
-                                        "Worker {}: Failed to deserialize ToWorkerMessage: {}",
-                                        self.worker_id, e
+        let mut termination_flag = false;
+        // Wait for a message from the scheduler
+        match rx.recv().await {
+            Some((message_type, message)) => {
+                match message_type {
+                    MessageType::ToWorkerMessage => {
+                        match serde_json::from_str::<ToWorkerMessage>(&message.message) {
+                            Ok(to_worker_msg) => match to_worker_msg.status {
+                                JobAskStatus::Found => {
+                                    tasks.push(to_worker_msg.job);
+                                    println!(
+                                        "Worker {}: Received job from scheduler ({} of {})",
+                                        self.worker_id,
+                                        tasks.len(),
+                                        self.num_concurrent_tasks
                                     );
-                                    break;
                                 }
+                                JobAskStatus::Terminate => {
+                                    println!(
+                                        "Worker {}: Received terminate message from scheduler",
+                                        self.worker_id
+                                    );
+                                    // self.shutdown().await;
+                                    termination_flag=true;
+                                }
+                                JobAskStatus::NotFound => {
+                                    println!(
+                                        "Worker {}: Job not found from scheduler",
+                                        self.worker_id
+                                    );
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(1))
+                                        .await;
+                                }
+                                JobAskStatus::OutofBoundsJob => {
+                                    println!(
+                                        "Worker {}: Out of bounds job from scheduler",
+                                        self.worker_id
+                                    );
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!(
+                                    "Worker {}: Failed to deserialize ToWorkerMessage: {}",
+                                    self.worker_id, e
+                                )
                             }
                         }
-                        MessageType::ToSchedulerMessage => {
-                            // This shouldn't happen - worker shouldn't receive ToSchedulerMessage
-                            println!(
-                                "Worker {}: Received unexpected ToSchedulerMessage",
-                                self.worker_id
-                            );
-                        }
+                    }
+                    MessageType::ToSchedulerMessage => {
+                        // This shouldn't happen - worker shouldn't receive ToSchedulerMessage
+                        println!(
+                            "Worker {}: Received unexpected ToSchedulerMessage",
+                            self.worker_id
+                        );
                     }
                 }
-                None => {
-                    println!(
-                        "Worker {}: Channel closed while waiting for scheduler response",
-                        self.worker_id
-                    );
-                    break;
-                }
+            }
+            None => {
+                println!(
+                    "Worker {}: Channel closed while waiting for scheduler response",
+                    self.worker_id
+                )
             }
         }
 
@@ -393,7 +387,7 @@ impl Worker {
             self.worker_id,
             tasks.len()
         );
-        return tasks;
+        return (termination_flag, tasks);
     }
 
     pub async fn start(&self) {
@@ -403,13 +397,13 @@ impl Worker {
         );
         
         // Wait for signal to start processing (from execute_jobs endpoint)
-        self.execution_notify.notified().await;
+        self.workers_notification_channel.notified().await;
 
         println!("Worker {}: Starting to process tasks", self.worker_id);
         let mut request_flag = false;
         let mut tasks_to_process: Vec<Job> = Vec::new();
 
-        
+        let mut termination_flag=false;
         loop {
             // Check for shutdown signal
             let mut flag = self.shutdown_flag.lock().await;
@@ -419,23 +413,74 @@ impl Worker {
                 return;
             }
 
-            // Request tasks based on num_concurrent_tasks
-            if self.num_concurrent_tasks == 1
-                && request_flag == false
-                && tasks_to_process.is_empty()
-            {
-                self.request_tasks(JobType::Mixed).await;
-                request_flag = true;
-            } else if self.num_concurrent_tasks == 2
-                && request_flag == false
-                && tasks_to_process.is_empty()
-            {
-                self.request_tasks(JobType::IOBound).await;
-                self.request_tasks(JobType::CPUBound).await;
-                request_flag = true;
+            // If terminated, immediately go idle and wait for notification
+            if termination_flag {
+                // Process any remaining tasks first
+                if !tasks_to_process.is_empty() {
+                    // Process remaining tasks before going idle
+                    match tasks_to_process.len() {
+                        1 => {
+                            self.run_task(tasks_to_process.pop().unwrap()).await;
+                        }
+                        2 => {
+                            let task_2 = tasks_to_process.pop().unwrap();
+                            let task_1 = tasks_to_process.pop().unwrap();
+                            tokio::join!(self.run_task(task_1), self.run_task(task_2));
+                        }
+                        _ => {
+                            for _ in 0..tasks_to_process.len() {
+                                let task = tasks_to_process.pop().unwrap();
+                                self.run_task(task).await;
+                            }
+                        }
+                    }
+                }
+                
+                // Now go idle and wait for notification
+                println!("Worker {}: Idle, waiting for notification to resume", self.worker_id);
+                self.workers_notification_channel.notified().await;
+                println!("Worker {}: Resuming task processing", self.worker_id);
+                termination_flag = false;
+                request_flag = false; // Reset request flag when resuming
+                continue; // Skip task requests and go back to top of loop
             }
 
-            tasks_to_process = self.receive_tasks().await;
+            // Only request tasks if not terminated
+            if !termination_flag {
+                // Request tasks based on num_concurrent_tasks
+                if self.num_concurrent_tasks == 1
+                    && request_flag == false
+                    && tasks_to_process.is_empty()
+                {
+                    self.request_tasks(JobType::Mixed).await;
+                    request_flag = true;
+                } else if self.num_concurrent_tasks == 2
+                    && request_flag == false
+                    && tasks_to_process.is_empty()
+                {
+                    self.request_tasks(JobType::IOBound).await;
+                    self.request_tasks(JobType::CPUBound).await;
+                    request_flag = true;
+                }
+            }
+
+            // Receive responses - need to receive as many as we sent
+            // For num_concurrent_tasks == 2, we sent 2 requests, so receive 2 responses
+            let mut received_count = 0;
+            let expected_responses = if self.num_concurrent_tasks == 2 { 2 } else { 1 };
+            
+            while received_count < expected_responses && !termination_flag {
+                let (new_termination_flag, new_tasks) = self.receive_tasks().await;
+                termination_flag = termination_flag || new_termination_flag;
+                tasks_to_process.extend(new_tasks);
+                received_count += 1;
+                
+                // If we received termination, stop receiving immediately
+                if termination_flag {
+                    println!("Worker {}: Received termination, stopping further requests", self.worker_id);
+                    break;
+                }
+            }
 
             // Handle empty tasks
             if tasks_to_process.is_empty() {

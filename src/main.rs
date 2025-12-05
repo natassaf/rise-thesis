@@ -6,21 +6,23 @@ mod scheduler;
 mod utils;
 mod wasm_loaders;
 mod worker;
+pub mod jobs_order_optimizer;
+
 use crate::api::api_handlers::{
     handle_execute_tasks, handle_get_result, handle_kill, handle_predict_and_sort,
     handle_submit_task,
 };
 use crate::api::api_objects::SubmittedJobs;
-use crate::channel_objects::Message;
+use crate::evaluation_metrics::EvaluationMetrics;
+use crate::jobs_order_optimizer::JobsOrderOptimizer;
 use crate::scheduler::SchedulerEngine;
-use actix_web::web::Data;
 use actix_web::{App, HttpServer, web};
 use core_affinity::{CoreId, get_core_ids};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::signal;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -81,8 +83,10 @@ async fn main() -> std::io::Result<()> {
     // Jobs will be added here with submit jobs endpoint and the scheduler will be able to see the updated vector, pull the jobs and add then into channels for the workers to pull from and process
     let jobs_log: web::Data<SubmittedJobs> = web::Data::new(SubmittedJobs::new());
 
-    // Wrapped arouns Arc cause we want to share and mutate scheduler across threads
-    // Mutex is needed cause some instance fields are mutable across threads
+    let workers_notification_channel = Arc::new(Notify::new());
+
+
+    // Create and start scheduler. Scheduler
     let scheduler = {
         let scheduler = Arc::new(Mutex::new(SchedulerEngine::new(
             core_ids,
@@ -90,10 +94,18 @@ async fn main() -> std::io::Result<()> {
             num_workers_to_start,
             pin_cores,
             num_concurrent_tasks,
+            workers_notification_channel.clone()
         )));
         let scheduler_data: web::Data<Arc<Mutex<SchedulerEngine>>> =
             web::Data::new(scheduler.clone());
         scheduler_data
+    };
+    
+    // Extract evaluation_metrics from scheduler for handler access
+    let evaluation_metrics: web::Data<Arc<EvaluationMetrics>> = {
+        let sched = scheduler.lock().await;
+        let metrics = sched.get_evaluation_metrics();
+        web::Data::new(metrics)
     };
 
 
@@ -104,6 +116,7 @@ async fn main() -> std::io::Result<()> {
         
 
     let scheduler_for_spawn = scheduler.clone();
+    let scheduler_for_spawn_2 = scheduler.clone();
     let worker_handlers_for_spawn = worker_handlers.clone();
     let scheduler_for_shutdown = scheduler.clone();
 
@@ -120,8 +133,14 @@ async fn main() -> std::io::Result<()> {
         }
     });
     
+    tokio::spawn(async move {
+        let mut sched = scheduler_for_spawn_2.lock().await;
+        sched.start().await;
+    });
+
     // Create server with graceful shutdown
     let server = HttpServer::new(move || {
+        let jobs_order_optimizer = web::Data::new(Arc::new(Mutex::new(JobsOrderOptimizer::new(jobs_log.clone()))));
         // Configure JSON payload size limit (default is 256KB, increase to 100MB for large image payloads)
         let json_config = web::JsonConfig::default()
             .limit(100 * 1024 * 1024) // 100MB limit for JSON payloads
@@ -131,7 +150,11 @@ async fn main() -> std::io::Result<()> {
             .app_data(json_config) // Apply JSON config globally
             .app_data(jobs_log.clone())
             .app_data(scheduler.clone())
-            .app_data(worker_handlers.clone());
+            .app_data(worker_handlers.clone())
+            .app_data(web::Data::new(workers_notification_channel.clone()))
+            .app_data(evaluation_metrics.clone())
+            .app_data(jobs_order_optimizer.clone());
+
         app = app.route("/submit_task", web::post().to(handle_submit_task));
         app = app.route("/get_result", web::get().to(handle_get_result));
         app = app.route("/predict_and_sort", web::post().to(handle_predict_and_sort));

@@ -1,8 +1,10 @@
 use crate::api::api_objects::{ExecuteTasksRequest, Job, SubmittedJobs, TaskQuery, WasmJobRequest};
+use crate::evaluation_metrics::{self, EvaluationMetrics};
+use crate::jobs_order_optimizer::{self, JobsOrderOptimizer};
 use crate::scheduler::SchedulerEngine;
 use actix_web::{HttpResponse, Responder, web};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 pub async fn handle_kill(
     app_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>>,
@@ -15,29 +17,46 @@ pub async fn handle_kill(
 
 pub async fn handle_predict_and_sort(
     task: web::Json<ExecuteTasksRequest>,
-    app_data: web::Data<Arc<Mutex<SchedulerEngine>>>,
+    app_data: web::Data<Arc<Mutex<JobsOrderOptimizer>>>,
 ) -> impl Responder {
-    let mut scheduler = app_data.lock().await;
+    let jobs_order_optimizer = app_data.lock().await;
     println!("Task received: {:?}", task);
     let scheduling_algorithm = task.into_inner().scheduling_algorithm;
-    println!(
-        "Predicting and sorting tasks with {} algorithm",
-        scheduling_algorithm
-    );
-    scheduler.predict_and_sort(scheduling_algorithm).await;
+    println!("Predicting and sorting tasks with {} algorithm", scheduling_algorithm);
+    jobs_order_optimizer.predict_and_sort(scheduling_algorithm).await;
     HttpResponse::Ok().body(format!("Predictions and sorting completed"))
 }
 
 pub async fn handle_execute_tasks(
-    shared_scheduler: web::Data<Arc<Mutex<SchedulerEngine>>>,
+    evaluation_metrics: web::Data<Arc<EvaluationMetrics>>,
+    jobs_logs:web::Data<SubmittedJobs>,
+    workers_notification_channel: web::Data<Arc<Notify>>,
 ) -> impl Responder {
-    let scheduler = shared_scheduler.clone();
+    // Set execution start time if not already set
+    if evaluation_metrics.get_execution_start_time().is_none() {
+        let start_time = std::time::Instant::now();
+        evaluation_metrics.set_execution_start_time(start_time);
+        println!("=== Execution start time set at {:?} ===", start_time);
+    }
 
-    tokio::spawn(async move {
-        let mut sched = scheduler.lock().await;
-        sched.start().await;
-    });
-
+    let task_ids: Vec<String> = jobs_logs.get_jobs().await.iter().map(|j| j.id.clone()).collect();
+    println!(
+        "Scheduler: Initializing task status with {} task IDs",
+        task_ids.len()
+    );
+    evaluation_metrics.initialize_task_status(task_ids).await;
+    
+    // Verify initialization
+    let total_tasks = evaluation_metrics.get_total_tasks().await;
+    println!(
+        "=== Ready to execute {} tasks ===",
+        total_tasks
+    );
+    
+    // Notify workers to start requesting jobs
+    workers_notification_channel.notify_waiters();
+    println!("=== Notified workers to start requesting tasks ===");
+    
     HttpResponse::Ok().body(format!("Executing tasks"))
 }
 
