@@ -121,7 +121,7 @@ impl SubmittedJobs {
     /// Get the next I/O-bound job from the jobs list
     /// Iterates from start (index 0) to end and returns the first job whose ID is in the io_bound_task_ids set
     /// Removes the job from the list when found
-    pub async fn get_next_io_bounded_job(&self) -> Option<Job> {
+    pub async fn get_next_io_bounded_job(&self, memory_capacity: usize) -> Option<Job> {
         let io_bound_task_ids = self.io_bound_task_ids.lock().await;
         let mut jobs = self.jobs.lock().await;
         for i in 0..jobs.len() {
@@ -137,7 +137,7 @@ impl SubmittedJobs {
     /// Get the next CPU-bound job from the jobs list
     /// Iterates from start (index 0) to end and returns the first job whose ID is in the cpu_bound_task_ids set
     /// Removes the job from the list when found
-    pub async fn get_next_cpu_bounded_job(&self) -> Option<Job> {
+    pub async fn get_next_cpu_bounded_job(&self, memory_capacity: usize) -> Option<Job> {
         let cpu_bound_task_ids = self.cpu_bound_task_ids.lock().await;
         let mut jobs = self.jobs.lock().await;
         for i in 0..jobs.len() {
@@ -150,7 +150,7 @@ impl SubmittedJobs {
         None
     }
 
-    pub async fn get_next_job(&self) -> Option<Job> {
+    pub async fn get_next_job(&self, memory_capacity: usize) -> Option<Job> {
         let mut jobs = self.jobs.lock().await;
         if jobs.is_empty() {
             None

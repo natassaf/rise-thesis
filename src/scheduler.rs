@@ -205,25 +205,26 @@ impl SchedulerEngine {
 
     // fix this
     pub async fn  find_compatible_job(&self, msg: &ToSchedulerMessage)->Option<Job>{
+        let memory_capacity = msg.memory_capacity;
         let job = match msg.job_type {
             JobType::IOBound => {
-                self.submitted_jobs.get_next_io_bounded_job().await
+                self.submitted_jobs.get_next_io_bounded_job(memory_capacity).await
             }
             JobType::CPUBound => {
-                self.submitted_jobs.get_next_cpu_bounded_job().await
+                self.submitted_jobs.get_next_cpu_bounded_job(memory_capacity).await
             }
             JobType::Mixed => {
                 // Try IO-bound first, then CPU-bound, then any job
                 if let Some(job) =
-                    self.submitted_jobs.get_next_io_bounded_job().await
+                    self.submitted_jobs.get_next_io_bounded_job(memory_capacity).await
                 {
                     Some(job)
                 } else if let Some(job) =
-                    self.submitted_jobs.get_next_cpu_bounded_job().await
+                    self.submitted_jobs.get_next_cpu_bounded_job(memory_capacity).await
                 {
                     Some(job)
                 } else {
-                    self.submitted_jobs.get_next_job().await
+                    self.submitted_jobs.get_next_job(memory_capacity).await
                 }
             }
             JobType::None=> None
