@@ -18,49 +18,21 @@ use crate::jobs_order_optimizer::JobsOrderOptimizer;
 use crate::scheduler::SchedulerEngine;
 use actix_web::{App, HttpServer, web};
 use core_affinity::{CoreId, get_core_ids};
-use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::signal;
 use tokio::sync::{Mutex, Notify};
-
-#[derive(Debug, Deserialize)]
-struct Config {
-    pin_cores: bool,
-    num_workers: usize,
-    num_concurrent_tasks: Option<usize>, // Optional, defaults to 1 if not specified
-}
-
-fn load_config() -> Config {
-    // Try to read from config.yaml
-    match std::fs::read_to_string("config.yaml") {
-        Ok(config_content) => match serde_yaml::from_str::<Config>(&config_content) {
-            Ok(config) => config,
-            Err(e) => {
-                eprintln!(
-                    "Warning: Failed to parse config.yaml: {}, using defaults",
-                    e
-                );
-                Config {
-                    pin_cores: false,
-                    num_workers: 2,
-                    num_concurrent_tasks: Some(1),
-                }
-            }
-        },
-        Err(_) => {
-            eprintln!("Warning: config.yaml not found, using defaults");
-            Config {
-                pin_cores: false,
-                num_workers: 2,
-                num_concurrent_tasks: Some(1),
-            }
-        }
-    }
-}
+use utils::load_config;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    // Starts the http server with the required shared data. 
+    // Web server endpoints share the following app_data: 
+        // job_logs (stores the submitted tasks), 
+        // evaluation_metrics: Is initialized on execute tasks, calculates and stores total execution time, average response time per task, throughput
+        // workers_notification_channel: Channel to notify workers to start / restart 
+        // jobs_order_optimizer: Objects used to sort tasks before execution
+
     println!("Server started");
     let core_ids: Vec<CoreId> = get_core_ids().expect("Failed to get core IDs");
     println!("core_ids: {:?}", core_ids);
@@ -70,22 +42,17 @@ async fn main() -> std::io::Result<()> {
     let pin_cores = config.pin_cores;
     let num_workers_to_start = config.num_workers;
     let num_concurrent_tasks = config.num_concurrent_tasks.unwrap_or(1);
-    println!(
-        "pin_cores: {}, num_workers: {}, num_concurrent_tasks: {}",
-        pin_cores, num_workers_to_start, num_concurrent_tasks
-    );
+    println!("pin_cores: {}, num_workers: {}, num_concurrent_tasks: {}", pin_cores, num_workers_to_start, num_concurrent_tasks);
 
     // Global shutdown flag
-    static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
+    static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false); // used to shutdown the workers and scheduler running on the background
 
-    // Initialize scheduler object and job logger
-    // Wrapped in web::Data so that we configure them as shared resources across HTTPServer threads 
-    // Jobs will be added here with submit jobs endpoint and the scheduler will be able to see the updated vector, pull the jobs and add then into channels for the workers to pull from and process
+
+    // Initialize the app data
     let jobs_log: web::Data<SubmittedJobs> = web::Data::new(SubmittedJobs::new());
-
     let workers_notification_channel = Arc::new(Notify::new());
-
-
+    let evaluation_metrics = Arc::new(EvaluationMetrics::new());
+    
     // Create and start scheduler. Scheduler
     let scheduler = {
         let scheduler = Arc::new(Mutex::new(SchedulerEngine::new(
@@ -94,49 +61,22 @@ async fn main() -> std::io::Result<()> {
             num_workers_to_start,
             pin_cores,
             num_concurrent_tasks,
-            workers_notification_channel.clone()
+            workers_notification_channel.clone(),
+            evaluation_metrics.clone()
         )));
         let scheduler_data: web::Data<Arc<Mutex<SchedulerEngine>>> =
             web::Data::new(scheduler.clone());
         scheduler_data
     };
     
-    // Extract evaluation_metrics from scheduler for handler access
-    let evaluation_metrics: web::Data<Arc<EvaluationMetrics>> = {
-        let sched = scheduler.lock().await;
-        let metrics = sched.get_evaluation_metrics();
-        web::Data::new(metrics)
-    };
-
-
-    let worker_handlers: web::Data<Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>> = {
-        let worker_handlers: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(vec![]));
-        web::Data::new(worker_handlers.clone())
-    };
-        
-
-    let scheduler_for_spawn = scheduler.clone();
-    let scheduler_for_spawn_2 = scheduler.clone();
-    let worker_handlers_for_spawn = worker_handlers.clone();
     let scheduler_for_shutdown = scheduler.clone();
 
     // Store the workers handlers and the scheduler handle so we can abort it on shutdown
     let scheduler_handle = tokio::spawn(async move {
-        match scheduler_for_spawn.lock().await.start_scheduler().await {
-            Ok(handles) => {
-                let mut wh = worker_handlers_for_spawn.lock().await;
-                *wh = handles;
-            }
-            Err(e) => {
-                eprintln!("Scheduler error: {:?}", e);
-            }
-        }
+        scheduler.lock().await.start_workers().await.expect("Failed to start workers");
+        scheduler.lock().await.start().await;
     });
     
-    tokio::spawn(async move {
-        let mut sched = scheduler_for_spawn_2.lock().await;
-        sched.start().await;
-    });
 
     // Create server with graceful shutdown
     let server = HttpServer::new(move || {
@@ -147,12 +87,10 @@ async fn main() -> std::io::Result<()> {
             .content_type_required(false); // Allow different content types if needed
 
         let mut app = App::new()
-            .app_data(json_config) // Apply JSON config globally
+            .app_data(json_config) 
             .app_data(jobs_log.clone())
-            .app_data(scheduler.clone())
-            .app_data(worker_handlers.clone())
             .app_data(web::Data::new(workers_notification_channel.clone()))
-            .app_data(evaluation_metrics.clone())
+            .app_data(web::Data::new(evaluation_metrics.clone()))
             .app_data(jobs_order_optimizer.clone());
 
         app = app.route("/submit_task", web::post().to(handle_submit_task));
@@ -164,11 +102,11 @@ async fn main() -> std::io::Result<()> {
     })
     .bind("[::]:8080")?
     .workers(2)
-    .shutdown_timeout(5) // 5 seconds timeout for graceful shutdown
+    .shutdown_timeout(5)
     .run();
 
     // ******* ENABLES SHUTDOWN *******
-    // Wait for either the server to complete or a shutdown signal
+    // The main thread blocks here and waits for either the server to complete or a shutdown signal
     tokio::select! {
         result = server => {
             if let Err(e) = result {
@@ -187,10 +125,9 @@ async fn main() -> std::io::Result<()> {
 
             // Abort the scheduler task
             scheduler_handle.abort();
-            // Wait a bit for cleanup
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-            // Exit the process -0 is a success code sent to the OS for clean shutdown
+            // Exit the process: 0 is a success code sent to the OS for clean shutdown
             std::process::exit(0);
         }
     }

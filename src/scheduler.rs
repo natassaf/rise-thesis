@@ -33,11 +33,9 @@ impl SchedulerEngine {
         num_workers_to_start: usize,
         pin_cores: bool,
         num_concurrent_tasks: usize,
-        workers_notification_channel:Arc<Notify>   
+        workers_notification_channel:Arc<Notify>,
+        evaluation_metrics:Arc<EvaluationMetrics>
     ) -> Self {
-        // Create shared evaluation metrics
-        let evaluation_metrics = Arc::new(EvaluationMetrics::new());
-
         // Create 4 producer channels to send ask message from worker to scheduler
         let (worker_tx, scheduler_rx) = mpsc::channel::<(MessageType, Message)>(10000);
         let scheduler_channel_rx = Arc::new(Mutex::new(scheduler_rx));
@@ -92,7 +90,7 @@ impl SchedulerEngine {
         }
     }
 
-    pub async fn start_scheduler(&mut self) -> Result<Vec<std::thread::JoinHandle<()>>, Error> {
+    pub async fn start_workers(&mut self) -> Result<Vec<std::thread::JoinHandle<()>>, Error> {
         // This function is used to start the scheduler and is called by the main function.
         // It pins the worker's main thread to its assigned core if pin_cores is true.
         // It creates a local runtime just for this thread and runs the worker's async logic on this pinned thread.
@@ -141,48 +139,6 @@ impl SchedulerEngine {
         Ok(handlers)
         // self.execute_jobs_continuously().await;
     }
-
-    // async fn store_task_ids_to_self(&mut self, io_bound_task_ids: Vec<String>, cpu_bound_task_ids: Vec<String>){
-    //     *self.cpu_bound_task_ids.lock().await = cpu_bound_task_ids;
-    //     *self.io_bound_task_ids.lock().await = io_bound_task_ids;
-    // }
-
-    pub async fn predict_and_sort(&mut self, scheduling_algorithm: String) {
-        // Get the jobs from the submitted jobs vector and add them to the two channels for the workers to pull from and process
-        // Create the appropriate scheduler algorithm based on the request
-        let scheduler_algo: Box<dyn SchedulerAlgorithm> = match scheduling_algorithm.as_str() {
-            "memory_time_aware" => Box::new(MemoryTimeAwareSchedulerAlgorithm::new()),
-            "baseline" => Box::new(BaselineStaticSchedulerAlgorithm::new()),
-            _ => panic!(
-                "Invalid scheduling algorithm: {}. Must be 'memory_time_aware' or 'baseline'",
-                scheduling_algorithm
-            ),
-        };
-
-        println!(
-            "=== Starting predictions and sorting with {} algorithm ===",
-            scheduling_algorithm
-        );
-
-        // Schedule tasks using the selected algorithm (does predictions and sorting)
-        let (io_bound_task_ids, cpu_bound_task_ids) =
-            scheduler_algo.prioritize_tasks(&self.submitted_jobs).await;
-
-        // // Store the task ID sets in SchedulerEngine)
-        // self.store_task_ids_to_self(io_bound_task_ids, cpu_bound_task_ids).await;
-
-        // // Also store in SubmittedJobs so workers can access them
-        self.submitted_jobs
-            .set_cpu_bound_task_ids(cpu_bound_task_ids)
-            .await;
-        self.submitted_jobs
-            .set_io_bound_task_ids(io_bound_task_ids)
-            .await;
-
-        // println!("=== Predictions and sorting completed ===");
-        // println!("=== Separated tasks: {} CPU-bound, {} I/O-bound ===", self.cpu_bound_task_ids.lock().await.len(), self.io_bound_task_ids.lock().await.len());
-    }
-
 
     pub async fn decode_scheduler_message(&self, message: &Message) -> Result<ToSchedulerMessage, anyhow::Error> {
         let message_from_worker = serde_json::from_str::<ToSchedulerMessage>(&message.message);
@@ -324,10 +280,6 @@ impl SchedulerEngine {
     pub async fn check_for_termination(&self)->bool{
         let all_completed = self.evaluation_metrics.are_all_tasks_completed().await;
         all_completed
-    }
-
-    pub async fn start_workers(&self){
-        self.workers_notification_channel.notify_waiters(); 
     }
 
     pub async fn send_termination_message(&self)->Result<(), Error>{

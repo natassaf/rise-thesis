@@ -19,6 +19,14 @@ impl EvaluationMetrics {
             completed_count: Arc::new(tokio::sync::Mutex::new(0)),
         }
     }
+
+    pub async fn initialize(&self, task_ids: Vec<String>){
+        let start_time = std::time::Instant::now();
+        self.set_execution_start_time(start_time);
+        println!("=== Execution start time set at {:?} ===", start_time);
+        self.initialize_task_status(task_ids).await;
+    }
+
     pub async fn are_all_tasks_completed(&self) -> bool {
         let completed_count = self.get_completed_count().await;
         let total_tasks = self.get_total_tasks().await;
@@ -59,7 +67,7 @@ impl EvaluationMetrics {
         *completed_count = 0;
         
         // Initialize with new tasks
-        for task_id in task_ids {
+        for task_id in task_ids.into_iter() {
             task_status.insert(task_id, 0); // 0 = not processed
         }
         
