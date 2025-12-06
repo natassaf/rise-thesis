@@ -21,10 +21,14 @@ impl EvaluationMetrics {
     }
 
     pub async fn initialize(&self, task_ids: Vec<String>){
+        let num_tasks = task_ids.len();
         let start_time = std::time::Instant::now();
         self.set_execution_start_time(start_time);
-        println!("=== Execution start time set at {:?} ===", start_time);
         self.initialize_task_status(task_ids).await;
+        let total_tasks = self.get_total_tasks().await;
+        println!("Evaluation metrics: Initializing task status with {} task IDs", num_tasks);
+        println!("=== Execution start time set at {:?} ===", start_time);
+        println!("Start executing {} tasks", total_tasks);
     }
 
     pub async fn are_all_tasks_completed(&self) -> bool {

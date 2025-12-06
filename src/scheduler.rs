@@ -7,13 +7,12 @@ use crate::channel_objects::{JobAskStatus, JobType, Message, ToSchedulerMessage,
 use crate::evaluation_metrics::EvaluationMetrics;
 use crate::{
     channel_objects::MessageType,
-    optimized_scheduling_preprocessing::scheduler_algorithms::{
-        BaselineStaticSchedulerAlgorithm, MemoryTimeAwareSchedulerAlgorithm, SchedulerAlgorithm,
-    },
     worker::Worker,
 };
 use actix_web::web;
 use core_affinity::*;
+
+
 
 // ========== SCHEDULER ==========
 pub struct SchedulerEngine {
@@ -21,12 +20,13 @@ pub struct SchedulerEngine {
     workers: Vec<Arc<Worker>>,
     scheduler_channel_rx: Arc<Mutex<mpsc::Receiver<(MessageType, Message)>>>, // Channel for workers messages to send to scheduler. Worker channels are cloned
     scheduler_txs: Arc<Mutex<Vec<mpsc::Sender<(MessageType, Message)>>>>, // Senders to send messages to workers
-    workers_notification_channel: Arc<Notify>, // Signal to workers to start processing
     evaluation_metrics: Arc<EvaluationMetrics>, // Evaluation metrics storage
     pin_cores: bool,
 }
 
+
 impl SchedulerEngine {
+
     pub fn new(
         core_ids: Vec<CoreId>,
         submitted_jobs: web::Data<SubmittedJobs>,
@@ -36,28 +36,11 @@ impl SchedulerEngine {
         workers_notification_channel:Arc<Notify>,
         evaluation_metrics:Arc<EvaluationMetrics>
     ) -> Self {
-        // Create 4 producer channels to send ask message from worker to scheduler
-        let (worker_tx, scheduler_rx) = mpsc::channel::<(MessageType, Message)>(10000);
-        let scheduler_channel_rx = Arc::new(Mutex::new(scheduler_rx));
+        
+        let (scheduler_txs, mut  worker_rxs, scheduler_channel_rx , worker_txs ) = SchedulerEngine::create_channels(num_workers_to_start);
 
-        // Create receiving channels to send the jobs and messages from scheduler to workers
-        let mut scheduler_txs = Vec::new();
-        let mut worker_rxs = Vec::new();
-
-        for _ in 0..num_workers_to_start {
-            let (tx, rx) = mpsc::channel::<(MessageType, Message)>(1000);
-            scheduler_txs.push(tx);
-            worker_rxs.push(rx);
-        }
-
-        // Create vector of cloned senders for workers (each worker gets a clone)
-        let worker_txs: Vec<_> = (0..num_workers_to_start)
-            .map(|_| worker_tx.clone())
-            .collect();
-
-        // Create workers - each worker gets its own WasmComponentLoader instance
-        // This allows parallel execution without mutex contention
-        // Mount the model_1 directory so ONNX models can be accessed
+        // Create workers - each worker gets its own WasmComponentLoader instance which allows parallel execution without mutex contention
+        // We also mount the models directory so ONNX models can be accessed
         let workers: Vec<Arc<Worker>> = core_ids[0..num_workers_to_start]
             .iter()
             .enumerate()
@@ -84,14 +67,39 @@ impl SchedulerEngine {
             workers,
             scheduler_channel_rx,
             scheduler_txs: Arc::new(Mutex::new(scheduler_txs)),
-            workers_notification_channel,
             evaluation_metrics,
             pin_cores,
         }
     }
 
+
+    pub fn create_channels(num_workers_to_start: usize) -> (Vec<mpsc::Sender<(MessageType, Message)>>, Vec<mpsc::Receiver<(MessageType, Message)>>, Arc<Mutex<mpsc::Receiver<(MessageType, Message)>>>, Vec<mpsc::Sender<(MessageType, Message)>>) {
+        // Create channels with 4 producers (workers) , 1 consumer (scheduler) to send messages from worker to scheduler
+        // Create 4 channels woth scheduler as producer and workers as consumers
+        let (worker_tx, scheduler_rx) = mpsc::channel::<(MessageType, Message)>(10000);
+        let scheduler_channel_rx: Arc<Mutex<mpsc::Receiver<(MessageType, Message)>>> = Arc::new(Mutex::new(scheduler_rx));
+
+
+        let mut scheduler_txs = Vec::new();
+        let mut worker_rxs = Vec::new();
+
+        for _ in 0..num_workers_to_start {
+            let (tx, rx) = mpsc::channel::<(MessageType, Message)>(1000);
+            scheduler_txs.push(tx);
+            worker_rxs.push(rx);
+        }
+
+        // Create vector of cloned senders for workers (each worker gets a clone)
+        let worker_txs: Vec<mpsc::Sender<(MessageType, Message)>> = (0..num_workers_to_start)
+            .map(|_| worker_tx.clone())
+            .collect();
+
+        return (scheduler_txs, worker_rxs,  scheduler_channel_rx , worker_txs )
+
+    }
+
     pub async fn start_workers(&mut self) -> Result<Vec<std::thread::JoinHandle<()>>, Error> {
-        // This function is used to start the scheduler and is called by the main function.
+        // This function is used to start the workers 
         // It pins the worker's main thread to its assigned core if pin_cores is true.
         // It creates a local runtime just for this thread and runs the worker's async logic on this pinned thread.
         // Finally, it pushes the handler to the handlers vector and returns the handlers vector.
@@ -137,7 +145,6 @@ impl SchedulerEngine {
         }
 
         Ok(handlers)
-        // self.execute_jobs_continuously().await;
     }
 
     pub async fn decode_scheduler_message(&self, message: &Message) -> Result<ToSchedulerMessage, anyhow::Error> {
@@ -348,29 +355,14 @@ impl SchedulerEngine {
         Ok(())
     }
 
-    pub async fn initialize_execution(&self) {
-        // Record start time
-        let start_time = std::time::Instant::now();
-        self.evaluation_metrics.set_execution_start_time(start_time);
-
-        let jobs = self.submitted_jobs.get_jobs().await;
-
-
-
-        // Verify initialization worked
-        let total_after_init = self.evaluation_metrics.get_total_tasks().await;
-        println!(
-            "=== Execution started at {:?} with {} tasks (verified: {} in metrics) ===",
-            start_time,
-            jobs.len(),
-            total_after_init
-        );
+    pub async fn shutdown(&mut self) {
+        println!("Shutting down scheduler and all workers...");
+        for worker in &self.workers {
+            worker.shutdown().await;
+        }
     }
 
     pub async fn start(&mut self) {
-        // Initialize execution (will be called again when handle_execute_tasks is called with new jobs)
-        self.initialize_execution().await;
-
         // Start loop to receive messages from workers
         let mut rx = self.scheduler_channel_rx.lock().await;
         let mut counter = 0;
@@ -389,25 +381,4 @@ impl SchedulerEngine {
             }
         }
     }
-
-    pub fn get_evaluation_metrics(&self) -> Arc<EvaluationMetrics> {
-        self.evaluation_metrics.clone()
-    }
-
-    pub async fn shutdown(&mut self) {
-        println!("Shutting down scheduler and all workers...");
-        for worker in &self.workers {
-            worker.shutdown().await;
-        }
-    }
-
-    // pub async fn execute_jobs_continuously(&mut self)->Result<(), Error>{
-    //     loop {
-    //         println!("Checking for new tasks");
-    //         println!("Num of submitted tasks: {:?}", self.submitted_jobs.get_num_tasks().await);
-    //         self.scheduler_algo.prioritize_tasks(&self.submitted_jobs).await;
-    //         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    //     }
-    // }
-
 }

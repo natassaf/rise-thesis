@@ -34,10 +34,7 @@ pub async fn handle_execute_tasks(
  
     // if no tasks were submitted don't notify the worker to start looping
     if !task_ids.is_empty(){
-        println!("Evaluation metrics: Initializing task status with {} task IDs", task_ids.len());
         evaluation_metrics.initialize(task_ids).await;
-        let total_tasks = evaluation_metrics.get_total_tasks().await;
-        println!("Start executing {} tasks", total_tasks);
         workers_notification_channel.notify_waiters();
     }
     HttpResponse::Ok().body(format!("Executing tasks"))
