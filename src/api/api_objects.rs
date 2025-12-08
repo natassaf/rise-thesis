@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ExecuteTasksRequest {
     pub scheduling_algorithm: String,
@@ -125,8 +126,9 @@ impl SubmittedJobs {
         let io_bound_task_ids = self.io_bound_task_ids.lock().await;
         let mut jobs = self.jobs.lock().await;
         for i in 0..jobs.len() {
-            if let Some(task_id) = jobs.get(i).map(|job| &job.id) {
-                if io_bound_task_ids.contains(task_id) {
+            if let Some((task_id, memory_pred)) = jobs.get(i).map(|job| (&job.id, &job.memory_prediction)) {
+                let job_memory = memory_pred.unwrap_or(0.0) as usize;
+                if io_bound_task_ids.contains(task_id) && job_memory<=memory_capacity{
                     return Some(jobs.remove(i));
                 }
             }
@@ -141,8 +143,10 @@ impl SubmittedJobs {
         let cpu_bound_task_ids = self.cpu_bound_task_ids.lock().await;
         let mut jobs = self.jobs.lock().await;
         for i in 0..jobs.len() {
-            if let Some(task_id) = jobs.get(i).map(|job| &job.id) {
-                if cpu_bound_task_ids.contains(task_id) {
+            if let Some((task_id, memory_pred)) = jobs.get(i).map(|job| (&job.id, &job.memory_prediction)) {
+                let job_memory = memory_pred.unwrap_or(0.0) as usize;
+                println!("job memore: {:?}, <=  memory_capacity: {:?}", job_memory, memory_capacity);
+                if cpu_bound_task_ids.contains(task_id) && job_memory<=memory_capacity {
                     return Some(jobs.remove(i));
                 }
             }
@@ -152,13 +156,15 @@ impl SubmittedJobs {
 
     pub async fn get_next_job(&self, memory_capacity: usize) -> Option<Job> {
         let mut jobs = self.jobs.lock().await;
-        if jobs.is_empty() {
-            None
-        } else {
-            Some(jobs.remove(0))
+        for i in 0..jobs.len() {
+            let job_memory = jobs[i].memory_prediction.unwrap_or(0.0) as usize;
+            println!("job memore: {:?}, <=  memory_capacity: {:?}", job_memory, memory_capacity);
+            if job_memory<=memory_capacity {
+                return Some(jobs.remove(i));
+            }
         }
+        None
     }
-
     pub async fn add_task(&self, task: Job) {
         let mut guard = self.jobs.lock().await;
         guard.push(task);

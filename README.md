@@ -72,11 +72,26 @@ Cross compilation didn't work on macOS due to the `ort` dependency that fails. U
    cargo build --release
    ```
 
-5. Run the application:
+5. Run the application :
+   sudo systemd-run --scope -p MemoryMax=5M ./target/release/rise-thesis
    ```bash
    ./target/release/rise-thesis
    ```
-
+6. To run on memory constraint mode:
+   Enable the Linux cgroup memory controller
+   ```bash
+   sudo nano /boot/firmware/cmdline.txt
+   ```
+   
+   Add these parameters to the single existing line:  
+   cgroup_enable=memory cgroup_memory=1 systemd.unified_cgroup_hierarchy=1
+   ```bash
+   sudo reboot
+   ```
+   Run the app:
+   ```bash
+   sudo systemd-run --scope -p MemoryMax=5M ./target/release/rise-thesis
+   ```
 
 ### On  the repo rise-scheduler-experiments
 
@@ -98,3 +113,5 @@ Cross compilation didn't work on macOS due to the `ort` dependency that fails. U
    ```bash
    python main.py
    ```
+
+

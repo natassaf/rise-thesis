@@ -1,6 +1,6 @@
 use crate::api::api_objects::SubmittedJobs;
 use crate::optimized_scheduling_preprocessing::scheduler_algorithms::{
-    BaselineStaticSchedulerAlgorithm, Improvement1, MemoryTimeAwareSchedulerAlgorithm, SchedulerAlgorithm
+    BaselineStaticSchedulerAlgorithm, Improvement1, Improvement2, MemoryTimeAwareSchedulerAlgorithm, SchedulerAlgorithm
 };
 use actix_web::web;
 
@@ -19,7 +19,7 @@ impl JobsOrderOptimizer {
         // Create the appropriate scheduler algorithm based on the request
         let scheduler_algo: Box<dyn SchedulerAlgorithm> = match scheduling_algorithm.as_str() {
             "improvement1"=>Box::new(Improvement1::new()),
-            // "improvement2"=>Box::new(Improvement2::new()),
+            "improvement2"=>Box::new(Improvement2::new()),
             // "improvement3"=>Box::new(Improvement3::new()),
             "memory_time_aware" => Box::new(MemoryTimeAwareSchedulerAlgorithm::new()),
             "baseline" => Box::new(BaselineStaticSchedulerAlgorithm::new()),
