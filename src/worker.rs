@@ -1,5 +1,6 @@
 use crate::api::api_objects::Job;
 use crate::channel_objects::{JobAskStatus, JobType, Message, ToSchedulerMessage, ToWorkerMessage};
+use crate::memory_monitoring::{get_memory_current_kb, get_memory_max};
 use crate::wasm_loaders::WasmComponentLoader;
 use crate::{channel_objects::MessageType, evaluation_metrics::EvaluationMetrics};
 use base64::{Engine, engine::general_purpose};
@@ -11,8 +12,7 @@ use std::io::Read;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, mpsc};
 use wasmtime::component::Val;
-use std::fs;
-use std::path::PathBuf;
+
 
 /// Decompress a gzip-compressed base64 payload
 fn decompress_payload(compressed_base64: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -71,54 +71,6 @@ impl Worker {
             num_concurrent_tasks,
         }
     }
-
-
-    fn get_available_memory_kb() -> Option<u64> {
-        let data = fs::read_to_string("/proc/meminfo").ok()?;
-        for line in data.lines() {
-            if line.starts_with("MemAvailable:") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    return parts[1].parse::<u64>().ok(); // value is in kB
-                }
-            }
-        }
-        None
-    }
-
-    fn get_cgroup_path() -> Option<PathBuf> {
-        let data = fs::read_to_string("/proc/self/cgroup").ok()?;
-        for line in data.lines() {
-            let parts: Vec<&str> = line.splitn(3, ':').collect();
-            if parts.len() == 3 {
-                // parts[2] is the relative path
-                let mut path = PathBuf::from("/sys/fs/cgroup");
-                path.push(parts[2].trim_start_matches('/'));
-                return Some(path);
-            }
-        }
-        None
-    }
-    
-    fn read_memory_file(file_name: &str) -> Option<u64> {
-        let path = Self::get_cgroup_path()?.join(file_name);
-        let data = fs::read_to_string(path).ok()?;
-        let trimmed = data.trim();
-        if trimmed == "max" {
-            None // no limit set
-        } else {
-            trimmed.parse::<u64>().ok()
-        }
-    }
-    
-    fn get_memory_max() -> Option<u64> {
-        Self::read_memory_file("memory.max")
-    }
-    
-    fn get_memory_current() -> Option<u64> {
-        Self::read_memory_file("memory.current")
-    }
-    
     
     pub async fn shutdown(&self) {
         let mut flag = self.shutdown_flag.lock().await;
@@ -279,6 +231,7 @@ impl Worker {
         let total_tasks = evaluation_metrics.get_total_tasks().await;
 
         if self.evaluation_metrics.are_all_tasks_completed().await {
+            let peak_memory = self.evaluation_metrics.get_peak_memory().await;
             let throughput = evaluation_metrics
                 .calculate_throughput(completion_time, total_tasks)
                 .await;
@@ -311,6 +264,7 @@ impl Worker {
                 total_time_duration.as_millis() as f64,
                 average_response_time_millis,
                 throughput,
+                peak_memory
             );
 
         }
@@ -318,8 +272,8 @@ impl Worker {
 
     pub async fn request_tasks(&self, job_type: JobType) {
         // let available_memory =Self::get_available_memory_kb().unwrap_or(100000) as usize;
-        let available_memory = ( Self::get_memory_current().unwrap_or(1000000000000) as f64 / 1000.0) as usize;
-        let memory_limit = ( Self::get_memory_max().unwrap() as f64 / 1000.0 ) as usize;
+        let available_memory = get_memory_current_kb();
+        let memory_limit = get_memory_max();
         println!("Available memory {}", available_memory);
         println!("Memory limit: {}", memory_limit);
         // Create ToSchedulerMessage with the required fields
@@ -472,12 +426,44 @@ impl Worker {
                     // Process remaining tasks before going idle
                     match tasks_to_process.len() {
                         1 => {
-                            self.run_task(tasks_to_process.pop().unwrap()).await;
+                            let task = tasks_to_process.pop().unwrap();
+                            let available_memory = get_memory_current_kb();
+                            let task_memory = task.memory_prediction.unwrap_or(0.0) as usize;
+                            println!("Before running check: task memory: {}, available memory {}", task_memory, available_memory);
+                            if task_memory <= available_memory {
+                                self.run_task(task).await;
+                            }
                         }
                         2 => {
+                            let available_memory = get_memory_current_kb();
                             let task_2 = tasks_to_process.pop().unwrap();
                             let task_1 = tasks_to_process.pop().unwrap();
-                            tokio::join!(self.run_task(task_1), self.run_task(task_2));
+
+                            
+                            let task_memory1 = task_1.memory_prediction.unwrap_or(0.0) as usize;
+                            let task_memory2 = task_2.memory_prediction.unwrap_or(0.0) as usize;
+                            println!("Before running check: task memory1: {}, available memory {}",task_memory1, available_memory);
+                            println!("Before running check: task memory2: {}, available memory {}",task_memory2, available_memory);
+                            
+                            // Create futures for tasks that can run
+                            let mut handlers = Vec::new();
+                            
+                            // if task_memory1 <= available_memory {
+                            if true{
+                                handlers.push(self.run_task(task_1));
+                            }
+                            
+                            // if task_memory2 <= available_memory {
+                            if true{
+                                handlers.push(self.run_task(task_2));
+                            }
+                            
+                            // Run all eligible tasks concurrently
+                            if handlers.is_empty() {
+                                println!("Worker {}: Both tasks skipped due to insufficient memory", self.worker_id);
+                            } else {
+                                futures::future::join_all(handlers).await;
+                            }
                         }
                         _ => {
                             for _ in 0..tasks_to_process.len() {
@@ -548,13 +534,50 @@ impl Worker {
             // Process tasks based on count
             match tasks_to_process.len() {
                 1 => {
-                    self.run_task(tasks_to_process.pop().unwrap()).await;
-                    request_flag = false;
+                    {
+                        let task = tasks_to_process.pop().unwrap();
+                        let available_memory = get_memory_current_kb();
+                        let task_memory = task.memory_prediction.unwrap_or(0.0) as usize;
+                        println!("Before running check: task memory: {}, available memory {}", task_memory, available_memory);
+                        // if task_memory <= available_memory {
+                        if true{
+                            self.run_task(task).await;
+                            request_flag = false;
+                        }
+                    }                    
                 }
                 2 => {
-                    let task_2 = tasks_to_process.pop().unwrap();
-                    let task_1 = tasks_to_process.pop().unwrap();
-                    tokio::join!(self.run_task(task_1), self.run_task(task_2));
+                    {
+                        let available_memory = get_memory_current_kb();
+                        let task_2 = tasks_to_process.pop().unwrap();
+                        let task_1 = tasks_to_process.pop().unwrap();
+
+                        
+                        let task_memory1 = task_1.memory_prediction.unwrap_or(0.0) as usize;
+                        let task_memory2 = task_2.memory_prediction.unwrap_or(0.0) as usize;
+                        println!("Before running check: task memory1: {}, available memory {}",task_memory1, available_memory);
+                        println!("Before running check: task memory2: {}, available memory {}",task_memory2, available_memory);
+                        
+                        // Create futures for tasks that can run
+                        let mut handlers = Vec::new();
+                        
+                        // if task_memory1 <= available_memory {
+                        if true{
+                            handlers.push(self.run_task(task_1));
+                        }
+                        
+                        // if task_memory2 <= available_memory {
+                        if true{
+                            handlers.push(self.run_task(task_2));
+                        }
+                        
+                        // Run all eligible tasks concurrently
+                        if handlers.is_empty() {
+                            println!("Worker {}: Both tasks skipped due to insufficient memory", self.worker_id);
+                        } else {
+                            futures::future::join_all(handlers).await;
+                        }
+                    }
                     request_flag = false;
                 }
                 _ => {

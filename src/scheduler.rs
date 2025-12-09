@@ -366,7 +366,7 @@ impl SchedulerEngine {
         // Start loop to receive messages from workers
         let mut rx = self.scheduler_channel_rx.lock().await;
         let mut counter = 0;
-        loop {
+        loop {   
             // Receive message from a worker
             println!("Iteration number: {}", counter);
             counter += 1;

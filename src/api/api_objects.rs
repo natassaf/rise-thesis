@@ -129,6 +129,7 @@ impl SubmittedJobs {
             if let Some((task_id, memory_pred)) = jobs.get(i).map(|job| (&job.id, &job.memory_prediction)) {
                 let job_memory = memory_pred.unwrap_or(0.0) as usize;
                 if io_bound_task_ids.contains(task_id) && job_memory<=memory_capacity{
+                    println!("job memore: {:?}, <=  memory_capacity: {:?}", job_memory, memory_capacity);
                     return Some(jobs.remove(i));
                 }
             }
@@ -145,8 +146,8 @@ impl SubmittedJobs {
         for i in 0..jobs.len() {
             if let Some((task_id, memory_pred)) = jobs.get(i).map(|job| (&job.id, &job.memory_prediction)) {
                 let job_memory = memory_pred.unwrap_or(0.0) as usize;
-                println!("job memore: {:?}, <=  memory_capacity: {:?}", job_memory, memory_capacity);
                 if cpu_bound_task_ids.contains(task_id) && job_memory<=memory_capacity {
+                    println!("job memore: {:?}, <=  memory_capacity: {:?}", job_memory, memory_capacity);
                     return Some(jobs.remove(i));
                 }
             }
@@ -158,8 +159,8 @@ impl SubmittedJobs {
         let mut jobs = self.jobs.lock().await;
         for i in 0..jobs.len() {
             let job_memory = jobs[i].memory_prediction.unwrap_or(0.0) as usize;
-            println!("job memore: {:?}, <=  memory_capacity: {:?}", job_memory, memory_capacity);
             if job_memory<=memory_capacity {
+                println!("job memore: {:?}, <=  memory_capacity: {:?}", job_memory, memory_capacity);
                 return Some(jobs.remove(i));
             }
         }

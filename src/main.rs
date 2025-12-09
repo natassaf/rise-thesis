@@ -7,6 +7,7 @@ mod utils;
 mod wasm_loaders;
 mod worker;
 pub mod jobs_order_optimizer;
+mod memory_monitoring;
 
 use crate::api::api_handlers::{
     handle_execute_tasks, handle_get_result, handle_kill, handle_predict_and_sort,

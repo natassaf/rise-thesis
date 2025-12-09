@@ -2,12 +2,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::Mutex;
+
+use crate::memory_monitoring::{get_peak_memory_kb, get_peak_memory_from_cgroup_kb};
+
 /// Evaluation metrics storage - separate from scheduler
 pub struct EvaluationMetrics {
     execution_start_time: Arc<StdMutex<Option<Instant>>>,
     response_time_per_task: Arc<StdMutex<HashMap<String, Duration>>>,
-    task_status: Arc<tokio::sync::Mutex<HashMap<String, u8>>>, // task_id -> 0 (not processed) or 1 (processed)
-    completed_count: Arc<tokio::sync::Mutex<usize>>,
+    task_status: Arc<Mutex<HashMap<String, u8>>>, // task_id -> 0 (not processed) or 1 (processed)
+    completed_count: Arc<Mutex<usize>>,
 }
 
 impl EvaluationMetrics {
@@ -121,6 +125,14 @@ pub async fn set_task_status(&self, task_id: String, status: u8) {
         }
     }
 
+    pub async fn get_peak_memory(&self)->u64{
+       // Prefer cgroup peak memory (more accurate when running with cgroup limits like systemd-run)
+       // Falls back to process peak RSS (VmHWM) if cgroup is not available
+       get_peak_memory_from_cgroup_kb()
+           .or_else(|| get_peak_memory_kb())
+           .unwrap_or(0)
+    }
+
     pub async fn reset(&self) {
         *self.execution_start_time.lock().unwrap() = None;
         self.task_status.lock().await.clear();
@@ -129,17 +141,17 @@ pub async fn set_task_status(&self, task_id: String, status: u8) {
     }
 }
 
-// Standalone function to store evaluation metrics to file
 pub fn store_evaluation_metrics(
     total_tasks: usize,
     total_time_secs: f64,
     total_time_ms: f64,
     avg_time_ms: f64,
     throughput: f64,
+    max_memory_kb: u64
 ) {
     let metrics_content = format!(
-        "Total tasks processed: {}\nTotal execution time: {:.2} seconds ({:.2} ms)\nAverage time per task: {:.2} ms\nThroughput: {:.2} tasks/second\n",
-        total_tasks, total_time_secs, total_time_ms, avg_time_ms, throughput
+        "Max memory: {} \nTotal tasks processed: {}\nTotal execution time: {:.2} seconds ({:.2} ms)\nAverage time per task: {:.2} ms\nThroughput: {:.2} tasks/second\n",
+        max_memory_kb, total_tasks, total_time_secs, total_time_ms, avg_time_ms, throughput
     );
 
     if let Err(e) = std::fs::write("results/evaluation_metrics.txt", metrics_content) {
