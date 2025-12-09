@@ -1,6 +1,6 @@
 use crate::api::api_objects::Job;
 use crate::channel_objects::{JobAskStatus, JobType, Message, ToSchedulerMessage, ToWorkerMessage};
-use crate::memory_monitoring::{get_memory_current_kb, get_memory_max};
+use crate::memory_monitoring::{get_available_memory_kb};
 use crate::wasm_loaders::{WasmComponentLoader, ComponentCache};
 use crate::{channel_objects::MessageType, evaluation_metrics::EvaluationMetrics};
 use base64::{Engine, engine::general_purpose};
@@ -27,7 +27,6 @@ fn decompress_payload(compressed_base64: &str) -> Result<String, Box<dyn std::er
     Ok(decompressed)
 }
 
-// Worker is mapped to a core id and pulls tasks from shared channels when free
 pub struct Worker {
     pub worker_id: usize,
     pub core_id: CoreId,
@@ -36,11 +35,12 @@ pub struct Worker {
     shutdown_flag: Arc<Mutex<bool>>,
     wasm_loader: Arc<Mutex<WasmComponentLoader>>,
     component_cache: Arc<ComponentCache>, // Shared component cache (for compilation)
-   workers_notification_channel: Arc<Notify>, // Wait for signal to start processing
+    workers_notification_channel: Arc<Notify>, 
     evaluation_metrics: Arc<EvaluationMetrics>, // Reference to evaluation metrics
     num_concurrent_tasks: usize,
 }
 
+/// Converts the input to the wasm component from string to wasmtime::component::Val
 fn input_to_wasm_event_val(input: String) -> wasmtime::component::Val {
     let event_val = wasmtime::component::Val::String(input.into());
     let record_fields = vec![("event".to_string(), event_val)];
@@ -74,38 +74,22 @@ impl Worker {
             num_concurrent_tasks,
         }
     }
-    
-    pub async fn shutdown(&self) {
-        let mut flag = self.shutdown_flag.lock().await;
-        *flag = true;
-    }
 
+    /// Store result of wasm component execution for the user to retrieve
     pub fn store_result_uncompressed<T: std::fmt::Display>(task_id: &str, result: &T) {
-        // Store compressed result in a file named after the task
         let file_name = format!("results/result_{}.txt", task_id);
-
-        // Format the result
         let result_string = format!("Result: {}", result);
-
-        // Write the compressed data to file
         std::fs::write(&file_name, &result_string)
-            .expect("Failed to write compressed result to file");
-
-        println!(
-            "Stored result for task {}: {} ",
-            task_id,
-            result_string.len()
+            .expect("Failed to write uncompressed result to file");
+        println!("Stored result for task {}: {} ", task_id, result_string.len()
         );
     }
 
-    pub fn store_result<T: std::fmt::Display>(task_id: &str, result: &T) {
-        // Store compressed result in a file named after the task
+    /// Store compressed result of wasm component execution for the user to retrieve 
+    pub fn _store_compressed_result<T: std::fmt::Display>(task_id: &str, result: &T) {
         let file_name = format!("results/result_{}.gz", task_id);
 
-        // Format the result
         let result_string = format!("Result: {}", result);
-
-        // Compress the result using gzip
         let mut compressed_data = Vec::new();
         {
             let mut encoder = GzEncoder::new(&mut compressed_data, Compression::default());
@@ -113,8 +97,6 @@ impl Worker {
                 .expect("Failed to compress result");
             encoder.finish().expect("Failed to finish compression");
         }
-
-        // Write the compressed data to file
         std::fs::write(&file_name, &compressed_data)
             .expect("Failed to write compressed result to file");
 
@@ -125,6 +107,7 @@ impl Worker {
             compressed_data.len()
         );
     }
+
 
     pub async fn run_wasm_job_component(
         core_id: CoreId,
@@ -173,6 +156,49 @@ impl Worker {
         Ok((task_id, result))
     }
 
+    /// Called when all tasks are completed
+    /// Calculates and saves evaluation metrics
+    async fn all_tasks_completed_callback(&self ){
+        let completed_count = self.evaluation_metrics.get_completed_count().await;
+        let total_tasks = self.evaluation_metrics.get_total_tasks().await;
+        let completion_time = std::time::Instant::now();
+        let peak_memory = self.evaluation_metrics.get_peak_memory().await;
+        let throughput = self.evaluation_metrics
+            .calculate_throughput(completion_time, total_tasks)
+            .await;
+        let average_response_time_millis =
+            self.evaluation_metrics.calculate_average_response_time().await;
+        let total_time_duration =
+            if let Some(start) = self.evaluation_metrics.get_execution_start_time() {
+                completion_time.duration_since(start)
+            } else {
+                std::time::Duration::from_secs(0)
+            };
+
+        println!("=== Execution completed ===");
+        println!("Total tasks processed: {}", completed_count);
+        println!(
+            "Total execution time: {:.2} seconds ({:.2} ms)",
+            total_time_duration.as_secs(),
+            total_time_duration.as_millis()
+        );
+        println!(
+            "Average response time per task: {:.2} ms",
+            average_response_time_millis
+        );
+        println!("Throughput: {:.2} tasks/second", throughput);
+
+        // Store metrics to file
+        crate::evaluation_metrics::store_evaluation_metrics(
+            completed_count,
+            total_time_duration.as_secs_f64(),
+            total_time_duration.as_millis() as f64,
+            average_response_time_millis,
+            throughput,
+            peak_memory
+        );
+    }
+
     async fn run_task(&self, task: Job) {
         let task_id = task.id.clone();
 
@@ -198,17 +224,17 @@ impl Worker {
 
         // Get start_time from evaluation metrics
         let start_time = evaluation_metrics.get_execution_start_time();
-        if start_time.is_none() {
-            eprintln!(
-                "Worker {}: Execution not started yet, skipping task {}",
-                self.worker_id, task_id
-            );
-            return;
-        }
-        let start_time = start_time.unwrap();
+        let start_time = match start_time {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "Worker {}: Execution not started yet, skipping task {}",
+                    self.worker_id, task_id
+                );
+                return;
+            }
+        };
 
-        // Run the task directly on this worker's runtime (which is pinned to the core)
-        // This allows multiple workers to run tasks in parallel
         let handler = Worker::run_wasm_job_component(
             core_id,
             task_id.clone(),
@@ -227,61 +253,25 @@ impl Worker {
             Err(_) => task_id.clone(),
         };
 
-        let completion_time = std::time::Instant::now();
         evaluation_metrics
             .set_task_status(completed_task_id.clone(), 1)
             .await;
 
         // Check if all tasks are completed
-        let completed_count = evaluation_metrics.get_completed_count().await;
-        let total_tasks = evaluation_metrics.get_total_tasks().await;
-
         if self.evaluation_metrics.are_all_tasks_completed().await {
-            let peak_memory = self.evaluation_metrics.get_peak_memory().await;
-            let throughput = evaluation_metrics
-                .calculate_throughput(completion_time, total_tasks)
-                .await;
-            let average_response_time_millis =
-                evaluation_metrics.calculate_average_response_time().await;
-            let total_time_duration =
-                if let Some(start) = evaluation_metrics.get_execution_start_time() {
-                    completion_time.duration_since(start)
-                } else {
-                    std::time::Duration::from_secs(0)
-                };
-
-            println!("=== Execution completed ===");
-            println!("Total tasks processed: {}", completed_count);
-            println!(
-                "Total execution time: {:.2} seconds ({:.2} ms)",
-                total_time_duration.as_secs(),
-                total_time_duration.as_millis()
-            );
-            println!(
-                "Average response time per task: {:.2} ms",
-                average_response_time_millis
-            );
-            println!("Throughput: {:.2} tasks/second", throughput);
-
-            // Store metrics to file
-            crate::evaluation_metrics::store_evaluation_metrics(
-                completed_count,
-                total_time_duration.as_secs_f64(),
-                total_time_duration.as_millis() as f64,
-                average_response_time_millis,
-                throughput,
-                peak_memory
-            );
-
+            self.all_tasks_completed_callback().await;
         }
     }
 
+    pub async fn shutdown(&self){
+        let mut flag = self.shutdown_flag.lock().await;
+        *flag = true;
+    }
+
+    /// Send a job request to scheduler with parameters worker_id, job_type, memory_capacity
     pub async fn request_tasks(&self, job_type: JobType) {
-        // let available_memory =Self::get_available_memory_kb().unwrap_or(100000) as usize;
-        let available_memory = get_memory_current_kb();
-        let memory_limit = get_memory_max();
+        let available_memory = get_available_memory_kb();
         println!("Available memory {}", available_memory);
-        println!("Memory limit: {}", memory_limit);
         // Create ToSchedulerMessage with the required fields
         let to_scheduler_msg = ToSchedulerMessage {
             worker_id: self.worker_id,
@@ -290,15 +280,8 @@ impl Worker {
         };
 
         // Serialize the message to JSON
-        let message_json = match serde_json::to_string(&to_scheduler_msg) {
-            Ok(json) => json,
-            Err(e) => {
-                panic!(
-                    "Worker {}: Failed to serialize ToSchedulerMessage: {}",
-                    self.worker_id, e
-                );
-            }
-        };
+        let message_json = serde_json::to_string(&to_scheduler_msg)
+            .unwrap_or_else(|e| panic!("Worker {}: Failed to serialize ToSchedulerMessage: {}", self.worker_id, e));
 
         // Create Message wrapper
         let message = Message {
@@ -307,16 +290,12 @@ impl Worker {
         };
 
         // Send the message to the scheduler
-        if let Err(e) = self
-            .worker_channel_tx
-            .send((MessageType::ToSchedulerMessage, message))
-            .await
-        {
-            panic!(
-                "Worker {}: Failed to send message to scheduler: {}",
-                self.worker_id, e
-            );
-        }
+        self.worker_channel_tx
+        .send((MessageType::ToSchedulerMessage, message))
+        .await.unwrap_or_else(|e| {panic!(
+            "Worker {}: Failed to send message to scheduler: {}",
+            self.worker_id, e
+        )});
 
         println!(
             "Worker {}: Sent task request to scheduler (job_type: {:?}, memory: {})",
@@ -324,6 +303,8 @@ impl Worker {
         );
     }
 
+    /// Receive messages from Scheduler
+    /// If termination message is received return immediately!
     pub async fn receive_tasks(&self) -> (bool, Vec<Job>) {
         let mut tasks = Vec::new();
         let mut rx = self.worker_channel_rx.lock().await;
@@ -351,6 +332,7 @@ impl Worker {
                                     );
                                     // self.shutdown().await;
                                     termination_flag=true;
+                                    return (termination_flag, tasks);
                                 }
                                 JobAskStatus::NotFound => {
                                     println!(
@@ -394,19 +376,77 @@ impl Worker {
 
         drop(rx); // Release the lock
 
-        println!(
-            "Worker {}: Collected {} tasks from scheduler",
-            self.worker_id,
-            tasks.len()
-        );
+        println!( "Worker {}: Collected {} tasks from scheduler", self.worker_id, tasks.len());
         return (termination_flag, tasks);
     }
 
+    // Works only when executed on linux.
+    // Prints available memory a task predicted memory
+    pub fn print_memort_status(&self, task: &Job){
+        let available_memory = get_available_memory_kb();
+        let task_memory = task.memory_prediction.unwrap_or(0.0) as usize;
+        println!("Before running check: task memory: {}, available memory {}", task_memory, available_memory);
+
+    }
+
+    pub async fn process_task(&self, tasks_to_process: &mut Vec<Job> ){
+        if !tasks_to_process.is_empty() {
+            match tasks_to_process.len() {
+                1 => {
+                    let task = tasks_to_process.pop().unwrap();
+                    self.print_memort_status(&task);
+                    self.run_task(task).await;
+                }
+                2 => {
+                    let task_2 = tasks_to_process.pop().unwrap();
+                    let task_1 = tasks_to_process.pop().unwrap();
+                    self.print_memort_status(&task_1);
+                    self.print_memort_status(&task_2);
+
+                    let mut handlers = Vec::new();
+                    handlers.push(self.run_task(task_1));
+                    handlers.push(self.run_task(task_2));
+                    
+                    if handlers.is_empty() {
+                        println!("Worker {}: Both tasks skipped due to insufficient memory", self.worker_id);
+                    } else {
+                        futures::future::join_all(handlers).await;
+                    }
+                }
+                _ => {
+                    for _ in 0..tasks_to_process.len() {
+                        let task = tasks_to_process.pop().unwrap();
+                        self.run_task(task).await;
+                    }
+                }
+            }
+        }
+
+    }
+
+    /// The higher level logic on receiving tasks
+    pub async fn receive_responses_handler(&self, tasks_to_process: &mut Vec<Job>, expected_responses: usize)->bool{
+        let mut received_count = 0;
+        let mut termination_flag_local = false;
+        while received_count < expected_responses {
+            let (new_termination_flag, new_tasks) = self.receive_tasks().await;
+            tasks_to_process.extend(new_tasks);
+            received_count += 1;
+            termination_flag_local = new_termination_flag;
+            
+            // If we received termination, stop receiving immediately
+            if termination_flag_local {
+                println!("Worker {}: Received termination, stopping further requests", self.worker_id);
+                break;
+            }
+        }
+        return termination_flag_local;
+    }
+
+    /// Worker background loop -> sends job request messages to scheduler and receives them
+    /// When terminating it stops 
     pub async fn start(&self) {
-        println!(
-            "Worker: {:?} started on core id : {:?}",
-            self.worker_id, self.core_id
-        );
+        println!( "Worker: {:?} started on core id : {:?}", self.worker_id, self.core_id);
         
         // Wait for signal to start processing (from execute_jobs endpoint)
         self.workers_notification_channel.notified().await;
@@ -414,119 +454,56 @@ impl Worker {
         println!("Worker {}: Starting to process tasks", self.worker_id);
         let mut request_flag = false;
         let mut tasks_to_process: Vec<Job> = Vec::new();
-
         let mut termination_flag=false;
         loop {
             // Check for shutdown signal
-            let mut flag = self.shutdown_flag.lock().await;
-            if *flag {
-                println!("Worker: {:?} shutting down", self.worker_id);
-                *flag = false;
-                return;
-            }
+            {
+                let mut flag = self.shutdown_flag.lock().await;
+                if *flag {
+                    println!("Worker: {:?} shutting down", self.worker_id);
+                    *flag = false;
+                    return;
+                }
+            } // Lock is dropped here
 
-            // If terminated, immediately go idle and wait for notification
+            // If terminated, process remaining tasks and go idle waiting for notification to restart
             if termination_flag {
                 // Process any remaining tasks first
-                if !tasks_to_process.is_empty() {
-                    // Process remaining tasks before going idle
-                    match tasks_to_process.len() {
-                        1 => {
-                            let task = tasks_to_process.pop().unwrap();
-                            let available_memory = get_memory_current_kb();
-                            let task_memory = task.memory_prediction.unwrap_or(0.0) as usize;
-                            println!("Before running check: task memory: {}, available memory {}", task_memory, available_memory);
-                            if task_memory <= available_memory {
-                                self.run_task(task).await;
-                            }
-                        }
-                        2 => {
-                            let available_memory = get_memory_current_kb();
-                            let task_2 = tasks_to_process.pop().unwrap();
-                            let task_1 = tasks_to_process.pop().unwrap();
+                self.process_task(&mut tasks_to_process).await;
 
-                            
-                            let task_memory1 = task_1.memory_prediction.unwrap_or(0.0) as usize;
-                            let task_memory2 = task_2.memory_prediction.unwrap_or(0.0) as usize;
-                            println!("Before running check: task memory1: {}, available memory {}",task_memory1, available_memory);
-                            println!("Before running check: task memory2: {}, available memory {}",task_memory2, available_memory);
-                            
-                            // Create futures for tasks that can run
-                            let mut handlers = Vec::new();
-                            
-                            // if task_memory1 <= available_memory {
-                            if true{
-                                handlers.push(self.run_task(task_1));
-                            }
-                            
-                            // if task_memory2 <= available_memory {
-                            if true{
-                                handlers.push(self.run_task(task_2));
-                            }
-                            
-                            // Run all eligible tasks concurrently
-                            if handlers.is_empty() {
-                                println!("Worker {}: Both tasks skipped due to insufficient memory", self.worker_id);
-                            } else {
-                                futures::future::join_all(handlers).await;
-                            }
-                        }
-                        _ => {
-                            for _ in 0..tasks_to_process.len() {
-                                let task = tasks_to_process.pop().unwrap();
-                                self.run_task(task).await;
-                            }
-                        }
-                    }
-                }
-                
                 // Now go idle and wait for notification
                 println!("Worker {}: Idle, waiting for notification to resume", self.worker_id);
                 self.workers_notification_channel.notified().await;
                 println!("Worker {}: Resuming task processing", self.worker_id);
                 termination_flag = false;
                 request_flag = false; // Reset request flag when resuming
-                continue; // Skip task requests and go back to top of loop
+                continue; 
             }
 
-            // Only request tasks if not terminated
-            if !termination_flag {
+            // Track if we actually sent requests in this iteration
+            let mut sent_requests = 0;
+
+            // If no termination flag -> Send request for jobs message to scheduler
+            if !termination_flag && tasks_to_process.is_empty() {
                 // Request tasks based on num_concurrent_tasks
-                if self.num_concurrent_tasks == 1
-                    && request_flag == false
-                    && tasks_to_process.is_empty()
-                {
+                if self.num_concurrent_tasks == 1 && !request_flag {
                     self.request_tasks(JobType::Mixed).await;
+                    sent_requests = 1;
                     request_flag = true;
-                } else if self.num_concurrent_tasks == 2
-                    && request_flag == false
-                    && tasks_to_process.is_empty()
-                {
+                } else if self.num_concurrent_tasks == 2 && !request_flag {
                     self.request_tasks(JobType::IOBound).await;
                     self.request_tasks(JobType::CPUBound).await;
+                    sent_requests = 2;
                     request_flag = true;
                 }
             }
 
-            // Receive responses - need to receive as many as we sent
-            // For num_concurrent_tasks == 2, we sent 2 requests, so receive 2 responses
-            let mut received_count = 0;
-            let expected_responses = if self.num_concurrent_tasks == 2 { 2 } else { 1 };
-            
-            while received_count < expected_responses && !termination_flag {
-                let (new_termination_flag, new_tasks) = self.receive_tasks().await;
-                termination_flag = termination_flag || new_termination_flag;
-                tasks_to_process.extend(new_tasks);
-                received_count += 1;
-                
-                // If we received termination, stop receiving immediately
-                if termination_flag {
-                    println!("Worker {}: Received termination, stopping further requests", self.worker_id);
-                    break;
-                }
+            // Only receive responses if we actually sent requests in this iteration
+            if sent_requests > 0 && !termination_flag {
+                termination_flag = self.receive_responses_handler(&mut tasks_to_process, sent_requests).await;
             }
 
-            // Handle empty tasks
+            // If tasks are empty -> check for termination
             if tasks_to_process.is_empty() {
                 request_flag = false;
                 if self.evaluation_metrics.are_all_tasks_completed().await {
@@ -536,63 +513,8 @@ impl Worker {
                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 continue;
             }
-
-            // Process tasks based on count
-            match tasks_to_process.len() {
-                1 => {
-                    {
-                        let task = tasks_to_process.pop().unwrap();
-                        let available_memory = get_memory_current_kb();
-                        let task_memory = task.memory_prediction.unwrap_or(0.0) as usize;
-                        println!("Before running check: task memory: {}, available memory {}", task_memory, available_memory);
-                        // if task_memory <= available_memory {
-                        if true{
-                            self.run_task(task).await;
-                            request_flag = false;
-                        }
-                    }                    
-                }
-                2 => {
-                    {
-                        let available_memory = get_memory_current_kb();
-                        let task_2 = tasks_to_process.pop().unwrap();
-                        let task_1 = tasks_to_process.pop().unwrap();
-
-                        
-                        let task_memory1 = task_1.memory_prediction.unwrap_or(0.0) as usize;
-                        let task_memory2 = task_2.memory_prediction.unwrap_or(0.0) as usize;
-                        println!("Before running check: task memory1: {}, available memory {}",task_memory1, available_memory);
-                        println!("Before running check: task memory2: {}, available memory {}",task_memory2, available_memory);
-                        
-                        // Create futures for tasks that can run
-                        let mut handlers = Vec::new();
-                        
-                        // if task_memory1 <= available_memory {
-                        if true{
-                            handlers.push(self.run_task(task_1));
-                        }
-                        
-                        // if task_memory2 <= available_memory {
-                        if true{
-                            handlers.push(self.run_task(task_2));
-                        }
-                        
-                        // Run all eligible tasks concurrently
-                        if handlers.is_empty() {
-                            println!("Worker {}: Both tasks skipped due to insufficient memory", self.worker_id);
-                        } else {
-                            futures::future::join_all(handlers).await;
-                        }
-                    }
-                    request_flag = false;
-                }
-                _ => {
-                    for _ in 0..tasks_to_process.len() {
-                        let task = tasks_to_process.pop().unwrap();
-                        self.run_task(task).await;
-                    }
-                    request_flag = false;
-                }
+            else{
+                self.process_task(&mut tasks_to_process).await;
             }
         }
     }

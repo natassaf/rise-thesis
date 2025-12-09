@@ -26,20 +26,6 @@ pub fn get_peak_memory_from_cgroup_kb() -> Option<u64> {
 }
 
 
-
-pub fn get_available_memory_kb() -> Option<u64> {
-    let data = fs::read_to_string("/proc/meminfo").ok()?;
-    for line in data.lines() {
-        if line.starts_with("MemAvailable:") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                return parts[1].parse::<u64>().ok(); // value is in kB
-            }
-        }
-    }
-    None
-}
-
 pub fn get_cgroup_path() -> Option<PathBuf> {
     let data = fs::read_to_string("/proc/self/cgroup").ok()?;
     for line in data.lines() {
@@ -72,13 +58,12 @@ pub fn get_memory_max() -> usize {
     max_memory
 }
 
-pub fn get_memory_current_kb() -> usize {
+pub fn get_available_memory_kb() -> usize {
     // Get current memory usage and max limit
     let current_usage_bytes = read_memory_file("memory.current").unwrap_or(0);
     let max_limit_bytes = read_memory_file("memory.max").unwrap_or(1000000000000);
     
-    // Calculate available memory: max - current (both in bytes)
-    // Then convert to KB
+    // Calculate available memory: max - current (bytes) and convert to KB
     let available_bytes = max_limit_bytes.saturating_sub(current_usage_bytes);
     let available_memory_kb = (available_bytes as f64 / 1024.0) as usize;
     

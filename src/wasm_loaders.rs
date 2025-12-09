@@ -87,12 +87,6 @@ impl IoView for HostState {
     }
 }
 
-/// Shared component cache - handles compilation and caching (thread-safe)
-pub struct ComponentCache {
-    engine: Engine,
-    linker: Linker<HostState>,
-    component_cache: Arc<Mutex<HashMap<String, Component>>>,
-}
 
 /// Per-worker store and execution context
 pub struct WasmComponentLoader {
@@ -104,6 +98,14 @@ pub struct WasmComponentLoader {
 struct WasmResult {
     output: String,
 }
+
+/// Shared component cache - handles compilation and caching (thread-safe)
+pub struct ComponentCache {
+    engine: Engine,
+    linker: Linker<HostState>,
+    component_cache: Arc<Mutex<HashMap<String, Component>>>,
+}
+
 
 impl ComponentCache {
     pub fn new(_folder_to_mount: String) -> Self {
