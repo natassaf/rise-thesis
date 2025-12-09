@@ -278,4 +278,67 @@ impl WasmComponentLoader {
         // println!("load result {:?}", results);
         return Ok(results);
     }
+
+    /// Clear the store by creating a new one, dropping all instances and freeing memory
+    /// This should be called after each task completes to prevent memory leaks
+    /// The folder_to_mount should be the same as used when creating the loader (e.g., "models")
+    pub fn clear_store(&mut self, folder_to_mount: &str) {
+        // Get the engine from the current store (needed to create new store)
+        let engine = self.store.engine();
+        
+        // Recreate HostState (same as in new())
+        let wasi = match folder_to_mount {
+            "" => WasiCtxBuilder::new().inherit_stdio().build(),
+            _ => {
+                // Canonicalize the path to ensure it's absolute and exists
+                let host_path = std::fs::canonicalize(folder_to_mount).unwrap_or_else(|e| {
+                    eprintln!(
+                        "Warning: Failed to canonicalize path '{}': {}. Using as-is.",
+                        folder_to_mount, e
+                    );
+                    std::path::PathBuf::from(folder_to_mount)
+                });
+
+                let host_path_str = host_path.to_string_lossy().to_string();
+                let guest_path = host_path_str.clone();
+
+                WasiCtxBuilder::new()
+                    .inherit_stdio()
+                    .preopened_dir(
+                        host_path_str.clone(),
+                        guest_path.clone(),
+                        DirPerms::READ,
+                        FilePerms::READ,
+                    )
+                    .unwrap_or_else(|e| {
+                        eprintln!(
+                            "ERROR: Failed to preopen directory '{}': {}",
+                            host_path_str, e
+                        );
+                        panic!("Failed to preopen directory: {}", e);
+                    })
+                    .build()
+            }
+        };
+
+        // Initialize ONNX backend (each worker gets its own)
+        let onnx_backend = Backend::from(OnnxBackend::default());
+        let my_registry = InMemoryRegistry::new();
+        let registry = Registry::from(my_registry);
+        let wasi_nn = WasiNnCtx::new(vec![onnx_backend], registry);
+
+        // Create a new Store to replace the old one - this drops all instances
+        let new_store: Store<HostState> = Store::new(
+            &engine,
+            HostState {
+                wasi,
+                table: wasmtime::component::ResourceTable::new(),
+                wasi_nn,
+            },
+        );
+
+        // Replace the old store with the new one
+        // This will drop the old store and all its instances, freeing memory
+        self.store = new_store;
+    }
 }

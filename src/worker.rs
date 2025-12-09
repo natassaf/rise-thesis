@@ -1,6 +1,6 @@
 use crate::api::api_objects::Job;
 use crate::channel_objects::{JobAskStatus, JobType, Message, ToSchedulerMessage, ToWorkerMessage};
-use crate::memory_monitoring::{get_available_memory_kb};
+use crate::memory_monitoring::get_available_memory_kb;
 use crate::wasm_loaders::{WasmComponentLoader, ComponentCache};
 use crate::{channel_objects::MessageType, evaluation_metrics::EvaluationMetrics};
 use base64::{Engine, engine::general_purpose};
@@ -396,6 +396,13 @@ impl Worker {
                     let task = tasks_to_process.pop().unwrap();
                     self.print_memort_status(&task);
                     self.run_task(task).await;
+                    
+                    // Clear store after single task completes
+                    // All Func objects from this task are already dropped
+                    {
+                        let mut loader = self.wasm_loader.lock().await;
+                        loader.clear_store("models");
+                    }
                 }
                 2 => {
                     let task_2 = tasks_to_process.pop().unwrap();
@@ -410,13 +417,27 @@ impl Worker {
                     if handlers.is_empty() {
                         println!("Worker {}: Both tasks skipped due to insufficient memory", self.worker_id);
                     } else {
+                        // Wait for all concurrent tasks to complete
                         futures::future::join_all(handlers).await;
+                    }
+                    
+                    // Clear store AFTER all concurrent tasks complete
+                    // This ensures no Func objects from the old store are still in use
+                    {
+                        let mut loader = self.wasm_loader.lock().await;
+                        loader.clear_store("models");
                     }
                 }
                 _ => {
                     for _ in 0..tasks_to_process.len() {
                         let task = tasks_to_process.pop().unwrap();
                         self.run_task(task).await;
+                    }
+                    
+                    // Clear store after all tasks complete
+                    {
+                        let mut loader = self.wasm_loader.lock().await;
+                        loader.clear_store("models");
                     }
                 }
             }
