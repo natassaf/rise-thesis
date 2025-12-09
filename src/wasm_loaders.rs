@@ -10,6 +10,9 @@ use wasmtime_wasi_nn::backend::onnx::OnnxBackend;
 use wasmtime_wasi_nn::wit::add_to_linker as add_wasi_nn;
 use wasmtime_wasi_nn::wit::{WasiNnCtx, WasiNnView};
 use wasmtime_wasi_nn::{InMemoryRegistry, Registry};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 // pub struct ModuleWasmLoader{
 //     engine:Engine,
@@ -61,7 +64,7 @@ use wasmtime_wasi_nn::{InMemoryRegistry, Registry};
 //     }
 // }
 
-struct HostState {
+pub struct HostState {
     wasi: WasiCtx,
     table: wasmtime::component::ResourceTable,
     wasi_nn: WasiNnCtx,
@@ -84,9 +87,15 @@ impl IoView for HostState {
     }
 }
 
-pub struct WasmComponentLoader {
+/// Shared component cache - handles compilation and caching (thread-safe)
+pub struct ComponentCache {
     engine: Engine,
-    //  pub store: Store<WasiP1Ctx>,
+    linker: Linker<HostState>,
+    component_cache: Arc<Mutex<HashMap<String, Component>>>,
+}
+
+/// Per-worker store and execution context
+pub struct WasmComponentLoader {
     store: Store<HostState>,
     linker: Linker<HostState>,
 }
@@ -96,16 +105,16 @@ struct WasmResult {
     output: String,
 }
 
-impl WasmComponentLoader {
-    pub fn new(folder_to_mount: String) -> Self {
-        println!("Loading wasm component");
+impl ComponentCache {
+    pub fn new(_folder_to_mount: String) -> Self {
+        println!("Initializing component cache");
 
         // initialize engine
         let mut config = Config::new();
         config.async_support(true).wasm_component_model(true);
         let engine = Engine::new(&config).unwrap();
 
-        // initialize linker
+        // initialize linker (shared across all workers)
         let mut linker: Linker<HostState> = Linker::new(&engine);
         p2::add_to_linker_async(&mut linker)
             .context("add_to_linker_async failed")
@@ -116,6 +125,41 @@ impl WasmComponentLoader {
         })
         .context("failed to add wasi-nn to linker")
         .unwrap();
+
+        Self {
+            engine,
+            linker,
+            component_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Get or compile a component (thread-safe, uses Mutex for cache access)
+    pub async fn get_component(&self, wasm_component_path: &str) -> Component {
+        let mut component_cache = self.component_cache.lock().await;
+        component_cache
+            .entry(wasm_component_path.to_string())
+            .or_insert_with(|| {
+                Component::from_file(&self.engine, wasm_component_path)
+                    .with_context(|| format!("failed to compile component at {:?}", wasm_component_path))
+                    .unwrap()
+            })
+            .clone()
+    }
+
+    /// Get the linker (read-only, can be shared)
+    pub fn linker(&self) -> &Linker<HostState> {
+        &self.linker
+    }
+
+    /// Get the engine (read-only, can be shared)
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+}
+
+impl WasmComponentLoader {
+    /// Create a new loader with its own Store (one per worker for parallelism)
+    pub fn new(folder_to_mount: String, cache: &ComponentCache) -> Self {
         let wasi = match folder_to_mount.as_str() {
             "" => WasiCtxBuilder::new().inherit_stdio().build(),
             _ => {
@@ -164,17 +208,15 @@ impl WasmComponentLoader {
             }
         };
 
-        // Initialize ONNX backend
+        // Initialize ONNX backend (each worker gets its own)
         let onnx_backend = Backend::from(OnnxBackend::default());
-
         let my_registry = InMemoryRegistry::new();
         let registry = Registry::from(my_registry);
-
-        // Create the WasiNnCtx with the ONNX backend
         let wasi_nn = WasiNnCtx::new(vec![onnx_backend], registry);
 
+        // Create a new Store for this worker (allows parallel execution)
         let store: Store<HostState> = Store::new(
-            &engine,
+            cache.linker().engine(),
             HostState {
                 wasi,
                 table: wasmtime::component::ResourceTable::new(),
@@ -182,19 +224,26 @@ impl WasmComponentLoader {
             },
         );
 
+        // Clone the linker (it's read-only after setup)
+        let linker = cache.linker().clone();
+
         Self {
-            engine,
             store,
             linker,
         }
     }
 
-    pub async fn load_func(&mut self, wasm_component_path: String, func_name: String) -> Func {
-        let component = Component::from_file(&self.engine, wasm_component_path.clone())
-            .with_context(|| format!("failed to compile component at {:?}", wasm_component_path))
-            .unwrap();
+    /// Load a function from a component (uses shared cache for compilation, but instantiates in this worker's store)
+    pub async fn load_func(
+        &mut self,
+        cache: &ComponentCache,
+        wasm_component_path: String,
+        func_name: String,
+    ) -> Func {
+        // Get component from shared cache (this is the only part that needs synchronization)
+        let component = cache.get_component(&wasm_component_path).await;
 
-        // 4) Instantiate
+        // Instantiate in this worker's own store (no lock needed - each worker has its own store)
         let instance = self
             .linker
             .instantiate_async(&mut self.store, &component)
@@ -202,13 +251,13 @@ impl WasmComponentLoader {
             .context("instantiate_async failed")
             .unwrap();
 
-        // 5) Lookup exported function by its world export name (usually the same as in the WIT).
+        // Lookup exported function
         let func: Func = instance
             .get_func(&mut self.store, &func_name)
             .ok_or_else(|| anyhow!("exported function `{func_name}` not found"))
             .unwrap();
 
-        return func;
+        func
     }
 
     pub async fn run_func(

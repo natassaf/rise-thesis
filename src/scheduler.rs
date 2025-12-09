@@ -39,20 +39,24 @@ impl SchedulerEngine {
         
         let (scheduler_txs, mut  worker_rxs, scheduler_channel_rx , worker_txs ) = SchedulerEngine::create_channels(num_workers_to_start);
 
+        // Create shared component cache (handles compilation, thread-safe)
+        let component_cache = Arc::new(crate::wasm_loaders::ComponentCache::new("models".to_string()));
+
         // Create workers - each worker gets its own WasmComponentLoader instance which allows parallel execution without mutex contention
         // We also mount the models directory so ONNX models can be accessed
         let workers: Vec<Arc<Worker>> = core_ids[0..num_workers_to_start]
             .iter()
             .enumerate()
             .map(|(i, core_id)| {
-                // Each worker gets its own WasmComponentLoader instance
+                // Each worker gets its own WasmComponentLoader instance with its own Store (for parallelism)
                 let worker_wasm_loader = Arc::new(Mutex::new(
-                    crate::wasm_loaders::WasmComponentLoader::new("models".to_string()),
+                    crate::wasm_loaders::WasmComponentLoader::new("models".to_string(), &component_cache),
                 ));
                 Arc::new(Worker::new(
                     core_id.id,
                     *core_id,
                     worker_wasm_loader,
+                    component_cache.clone(), // Share the cache with workers
                     worker_txs[i].clone(),
                     worker_rxs.remove(0),
                     workers_notification_channel.clone(),

@@ -1,7 +1,7 @@
 use crate::api::api_objects::Job;
 use crate::channel_objects::{JobAskStatus, JobType, Message, ToSchedulerMessage, ToWorkerMessage};
 use crate::memory_monitoring::{get_memory_current_kb, get_memory_max};
-use crate::wasm_loaders::WasmComponentLoader;
+use crate::wasm_loaders::{WasmComponentLoader, ComponentCache};
 use crate::{channel_objects::MessageType, evaluation_metrics::EvaluationMetrics};
 use base64::{Engine, engine::general_purpose};
 use core_affinity::CoreId;
@@ -35,6 +35,7 @@ pub struct Worker {
     worker_channel_rx: Arc<Mutex<mpsc::Receiver<(MessageType, Message)>>>,
     shutdown_flag: Arc<Mutex<bool>>,
     wasm_loader: Arc<Mutex<WasmComponentLoader>>,
+    component_cache: Arc<ComponentCache>, // Shared component cache (for compilation)
    workers_notification_channel: Arc<Notify>, // Wait for signal to start processing
     evaluation_metrics: Arc<EvaluationMetrics>, // Reference to evaluation metrics
     num_concurrent_tasks: usize,
@@ -51,6 +52,7 @@ impl Worker {
         worker_id: usize,
         core_id: CoreId,
         wasm_loader: Arc<Mutex<WasmComponentLoader>>,
+        component_cache: Arc<ComponentCache>,
         worker_channel_tx: mpsc::Sender<(MessageType, Message)>,
         worker_channel_rx: mpsc::Receiver<(MessageType, Message)>,
         workers_notification_channel: Arc<Notify>,
@@ -66,6 +68,7 @@ impl Worker {
             worker_channel_rx,
             shutdown_flag,
             wasm_loader,
+            component_cache,
             workers_notification_channel,
             evaluation_metrics,
             num_concurrent_tasks,
@@ -130,6 +133,7 @@ impl Worker {
         func_name: String,
         payload: String,
         shared_wasm_loader: Arc<Mutex<WasmComponentLoader>>,
+        component_cache: Arc<ComponentCache>,
         evaluation_metrics: Arc<EvaluationMetrics>,
         start_time: std::time::Instant,
     ) -> Result<(String, Result<Vec<Val>, anyhow::Error>), anyhow::Error> {
@@ -139,21 +143,21 @@ impl Worker {
             component_name, func_name
         );
 
-        // Load function - runs on pinned thread
-        let func_to_run = shared_wasm_loader
-            .lock()
-            .await
-            .load_func(component_name, func_name)
-            .await;
+        // Load function - only the component loading needs the lock (for cache access)
+        // The actual instantiation happens in the worker's own store (parallel)
+        let func_to_run = {
+            let mut loader = shared_wasm_loader.lock().await;
+            loader.load_func(&component_cache, component_name, func_name).await
+        };
 
         // Prepare input
         let input = vec![input_to_wasm_event_val(payload)];
 
-        let result = shared_wasm_loader
-            .lock()
-            .await
-            .run_func(input, func_to_run)
-            .await;
+        // Run function - uses worker's own store (no lock contention with other workers)
+        let result = {
+            let mut loader = shared_wasm_loader.lock().await;
+            loader.run_func(input, func_to_run).await
+        };
 
         match &result {
             Ok(val) => Self::store_result_uncompressed(&task_id, &format!("{:?}", val)),
@@ -188,6 +192,7 @@ impl Worker {
         let func_name = task.func_name.clone();
         let binary_path = task.binary_path.clone();
         let wasm_loader = self.wasm_loader.clone();
+        let component_cache = self.component_cache.clone();
         let evaluation_metrics = self.evaluation_metrics.clone();
         let core_id = self.core_id;
 
@@ -211,6 +216,7 @@ impl Worker {
             func_name,
             payload,
             wasm_loader,
+            component_cache,
             evaluation_metrics.clone(),
             start_time,
         )
