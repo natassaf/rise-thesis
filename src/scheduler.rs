@@ -1,9 +1,10 @@
 use std::sync::Arc;
+use std::collections::HashSet;
 use anyhow::Error;
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use crate::api::api_objects::{Job, SubmittedJobs};
-use crate::channel_objects::{JobAskStatus, JobType, Message, ToSchedulerMessage, ToWorkerMessage};
+use crate::channel_objects::{JobAskStatus, JobType, Message, TaskStatusMessage, ToSchedulerMessage, ToWorkerMessage};
 use crate::evaluation_metrics::EvaluationMetrics;
 use crate::{
     channel_objects::MessageType,
@@ -22,6 +23,7 @@ pub struct SchedulerEngine {
     scheduler_txs: Arc<Mutex<Vec<mpsc::Sender<(MessageType, Message)>>>>, // Senders to send messages to workers
     evaluation_metrics: Arc<EvaluationMetrics>, // Evaluation metrics storage
     pin_cores: bool,
+    worker_requests: Arc<Mutex<HashSet<usize>>>, // Track which workers have sent job requests
 }
 
 
@@ -73,6 +75,7 @@ impl SchedulerEngine {
             scheduler_txs: Arc::new(Mutex::new(scheduler_txs)),
             evaluation_metrics,
             pin_cores,
+            worker_requests: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -168,6 +171,25 @@ impl SchedulerEngine {
             }
         };
         Ok(message_from_worker)
+    }
+
+    pub async fn decode_task_status_message(&self, message: &Message)-> Result<TaskStatusMessage, anyhow::Error>{
+        let task_status = serde_json::from_str::<TaskStatusMessage>(&message.message);
+        let task_status: TaskStatusMessage = match task_status {
+            Ok(msg) => {
+                println!(
+                    "Scheduler: Received task status from worker {} for job {} (status: {:?})",
+                    msg.worker_id,
+                    msg.job_id,
+                    msg.status
+                );
+                msg
+            },
+            Err(e) => {
+                return Err(anyhow::Error::msg(format!("failed to deserialize task status message: {}", e)));
+            }
+        };
+        Ok(task_status)
     }
 
     // fix this
@@ -332,10 +354,52 @@ impl SchedulerEngine {
         match message_type {
             MessageType::ToSchedulerMessage => {
                 let from_worker_message:ToSchedulerMessage = self.decode_scheduler_message(&message).await.unwrap();
-                let job_to_send:Option<Job> = self.find_compatible_job(&from_worker_message).await;
+                
+                // Track this worker's request
+                let mut worker_requests = self.worker_requests.lock().await;
+                worker_requests.insert(from_worker_message.worker_id);
+                let num_worker_requests = worker_requests.len();
+                drop(worker_requests);
+                
+                // Check if all jobs are in reschedule
+                let all_in_reschedule = self.submitted_jobs.are_all_jobs_in_reschedule().await;
+                
+                // Only send job if: (all jobs in reschedule AND at least 2 workers requested) OR (not all in reschedule)
+                let should_send_job = if all_in_reschedule {
+                    num_worker_requests >= 2
+                } else {
+                    true
+                };
+                
+                let job_to_send:Option<Job> = if should_send_job {
+                    self.find_compatible_job(&from_worker_message).await
+                } else {
+                    None // Don't send job yet, wait for more worker requests
+                };
+                
+                // If we sent a job and all jobs were in reschedule, clear worker requests for next round
+                if job_to_send.is_some() && all_in_reschedule {
+                    let mut worker_requests = self.worker_requests.lock().await;
+                    worker_requests.clear();
+                }
+                
                 let response_message = self.encode_response(job_to_send, &from_worker_message).await;
                 self.send_message(&[from_worker_message.worker_id], &response_message).await?;
             }
+            MessageType::TaskStatusMessage=> {
+                let task_status_message = self.decode_task_status_message(&message).await.unwrap();
+                // Only remove job if status is Success
+                match task_status_message.status {
+                    crate::channel_objects::Status::Success => {
+                        self.submitted_jobs.remove_job(task_status_message.job_id).await;
+                    },
+                    crate::channel_objects::Status::Failed => {
+                        // Job failed, move from pending to reschedule
+                        self.submitted_jobs.move_to_reschedule(task_status_message.job_id.clone()).await;
+                        println!("Scheduler: Task {} failed, moved to reschedule", task_status_message.job_id);
+                    }
+                }
+            },
             MessageType::ToWorkerMessage => {
                 println!("Scheduler: Received unexpected ToWorkerMessage");
 

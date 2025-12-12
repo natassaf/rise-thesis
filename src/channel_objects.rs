@@ -39,6 +39,19 @@ pub struct ToSchedulerMessage {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum Status{
+    Success,
+    Failed
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TaskStatusMessage{
+    pub worker_id: usize,
+    pub status: Status,
+    pub job_id: String
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum JobAskStatus {
     Found,
     NotFound,
@@ -50,6 +63,7 @@ pub enum JobAskStatus {
 pub enum MessageType {
     ToWorkerMessage,
     ToSchedulerMessage,
+    TaskStatusMessage
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -1,5 +1,5 @@
 use crate::api::api_objects::Job;
-use crate::channel_objects::{JobAskStatus, JobType, Message, ToSchedulerMessage, ToWorkerMessage};
+use crate::channel_objects::{JobAskStatus, JobType, Message, Status, TaskStatusMessage, ToSchedulerMessage, ToWorkerMessage};
 use crate::memory_monitoring::get_available_memory_kb;
 use crate::wasm_loaders::{WasmComponentLoader, ComponentCache};
 use crate::{channel_objects::MessageType, evaluation_metrics::EvaluationMetrics};
@@ -8,6 +8,7 @@ use core_affinity::CoreId;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -38,6 +39,7 @@ pub struct Worker {
     workers_notification_channel: Arc<Notify>, 
     evaluation_metrics: Arc<EvaluationMetrics>, // Reference to evaluation metrics
     num_concurrent_tasks: usize,
+    task_memory_map: Arc<HashMap<String, usize>>, // HashMap of task_id -> memory_kb
 }
 
 /// Converts the input to the wasm component from string to wasmtime::component::Val
@@ -61,6 +63,10 @@ impl Worker {
     ) -> Self {
         let shutdown_flag = Arc::new(Mutex::new(false));
         let worker_channel_rx = Arc::new(Mutex::new(worker_channel_rx));
+        
+        // Load task_to_memory_kb.csv into HashMap
+        let task_memory_map = Arc::new(Worker::load_task_memory_map());
+        
         Worker {
             worker_id,
             core_id,
@@ -72,6 +78,65 @@ impl Worker {
             workers_notification_channel,
             evaluation_metrics,
             num_concurrent_tasks,
+            task_memory_map,
+        }
+    }
+
+    /// Load task_to_memory_kb.csv into a HashMap
+    fn load_task_memory_map() -> HashMap<String, usize> {
+        let mut map = HashMap::new();
+        let csv_path = "task_to_memory_kb.csv";
+        
+        match std::fs::read_to_string(csv_path) {
+            Ok(contents) => {
+                for line in contents.lines() {
+                    let parts: Vec<&str> = line.split(',').collect();
+                    if parts.len() == 2 {
+                        let task_id = parts[0].trim().to_string();
+                        if let Ok(memory_kb) = parts[1].trim().parse::<usize>() {
+                            map.insert(task_id, memory_kb);
+                        }
+                    }
+                }
+                println!("Loaded {} task memory mappings from {}", map.len(), csv_path);
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to load {}: {}. Task memory checks will be skipped.", csv_path, e);
+            }
+        }
+        map
+    }
+
+    /// Send TaskStatusMessage to scheduler
+    async fn send_task_status(&self, task_id: String, status: Status) {
+        let task_status_msg = TaskStatusMessage {
+            worker_id: self.worker_id,
+            status: status.clone(),
+            job_id: task_id.clone(),
+        };
+
+        let message_json = serde_json::to_string(&task_status_msg)
+            .unwrap_or_else(|e| {
+                eprintln!("Worker {}: Failed to serialize TaskStatusMessage: {}", self.worker_id, e);
+                return String::new();
+            });
+
+        if message_json.is_empty() {
+            return;
+        }
+
+        let message = Message {
+            message: message_json,
+            message_type: MessageType::TaskStatusMessage,
+        };
+
+        if let Err(e) = self.worker_channel_tx.send((MessageType::TaskStatusMessage, message)).await {
+            eprintln!("Worker {}: Failed to send TaskStatusMessage: {}", self.worker_id, e);
+        } else {
+            println!(
+                "Worker {}: Sent task status for task {}: {:?}",
+                self.worker_id, task_id, status
+            );
         }
     }
 
@@ -199,8 +264,33 @@ impl Worker {
         );
     }
 
-    async fn run_task(&self, task: Job) {
+    async fn run_task(&self, task: Job)->Status {
         let task_id = task.id.clone();
+
+        // Check memory requirement before executing
+        let current_memory = get_available_memory_kb();
+        let required_memory = self.task_memory_map.get(&task_id).copied();
+        
+        if let Some(required_mem) = required_memory {
+            if current_memory <= required_mem {
+                eprintln!(
+                    "Worker {}: Insufficient memory for task {}. Required: {} KB, Available: {} KB",
+                    self.worker_id, task_id, required_mem, current_memory
+                );
+                // Send failure status and return early
+                self.send_task_status(task_id.clone(), Status::Failed).await;
+                return Status::Failed;
+            }
+            println!(
+                "Worker {}: Memory check passed for task {}. Required: {} KB, Available: {} KB",
+                self.worker_id, task_id, required_mem, current_memory
+            );
+        } else {
+            println!(
+                "Worker {}: No memory requirement found for task {}, proceeding with execution",
+                self.worker_id, task_id
+            );
+        }
 
         // Decompress payload if needed
         let payload: String = if task.payload_compressed {
@@ -231,7 +321,9 @@ impl Worker {
                     "Worker {}: Execution not started yet, skipping task {}",
                     self.worker_id, task_id
                 );
-                return;
+                // Send failure status
+                self.send_task_status(task_id.clone(), Status::Failed).await;
+                return Status::Failed;
             }
         };
 
@@ -250,17 +342,26 @@ impl Worker {
 
         let completed_task_id = match handler {
             Ok((task_id_result, _result)) => task_id_result,
-            Err(_) => task_id.clone(),
+            Err(_) => {
+                // Task execution failed
+                self.send_task_status(task_id.clone(), Status::Failed).await;
+                return Status::Failed;
+            }
         };
 
         evaluation_metrics
             .set_task_status(completed_task_id.clone(), 1)
             .await;
 
+        // Send success status
+        self.send_task_status(completed_task_id.clone(), Status::Success).await;
+
         // Check if all tasks are completed
         if self.evaluation_metrics.are_all_tasks_completed().await {
             self.all_tasks_completed_callback().await;
         }
+
+        Status::Success
     }
 
     pub async fn shutdown(&self){
@@ -363,6 +464,13 @@ impl Worker {
                             "Worker {}: Received unexpected ToSchedulerMessage",
                             self.worker_id
                         );
+                    },
+                    MessageType::TaskStatusMessage =>{
+                        // This shouldn't happen - worker shouldn't receive ToSchedulerMessage
+                        println!(
+                            "Worker {}: Received unexpected ToSchedulerMessage",
+                            self.worker_id
+                        );
                     }
                 }
             }
@@ -395,7 +503,7 @@ impl Worker {
                 1 => {
                     let task = tasks_to_process.pop().unwrap();
                     self.print_memort_status(&task);
-                    self.run_task(task).await;
+                    let task_status =self.run_task(task).await;
                     
                     // Clear store after single task completes
                     // All Func objects from this task are already dropped
@@ -403,6 +511,7 @@ impl Worker {
                         let mut loader = self.wasm_loader.lock().await;
                         loader.clear_store("models");
                     }
+                    
                 }
                 2 => {
                     let task_2 = tasks_to_process.pop().unwrap();
