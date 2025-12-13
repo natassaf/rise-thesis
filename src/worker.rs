@@ -601,6 +601,13 @@ impl Worker {
                 // Process any remaining tasks first
                 self.process_task(&mut tasks_to_process).await;
 
+                // Clear WASM store to free all memory before going idle
+                {
+                    let mut loader = self.wasm_loader.lock().await;
+                    loader.clear_store("models");
+                    println!("Worker {}: Cleared WASM store, all memory freed", self.worker_id);
+                }
+
                 // Now go idle and wait for notification
                 println!("Worker {}: Idle, waiting for notification to resume", self.worker_id);
                 self.workers_notification_channel.notified().await;
