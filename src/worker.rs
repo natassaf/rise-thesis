@@ -319,10 +319,10 @@ impl Worker {
         // Send success status
         self.send_task_status(completed_task_id.clone(), Status::Success).await;
 
-        // Check if all tasks are completed
-        if self.evaluation_metrics.are_all_tasks_completed().await {
-            self.evaluation_metrics.all_tasks_completed_callback().await;
-        }
+        // // Check if all tasks are completed
+        // if self.evaluation_metrics.are_all_tasks_completed().await {
+        //     self.evaluation_metrics.all_tasks_completed_callback().await;
+        // }
 
         Status::Success
     }
@@ -613,14 +613,11 @@ impl Worker {
                 termination_flag = self.receive_responses_handler(&mut tasks_to_process, sent_requests).await;
             }
 
-            // If tasks are empty -> check for termination
+            // If tasks are empty -> wait a bit and continue
             if tasks_to_process.is_empty() {
                 request_flag = false;
-                if self.evaluation_metrics.are_all_tasks_completed().await {
-                    println!("Worker {}: All tasks completed, exiting", self.worker_id);
-                    break;
-                }
-                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                // Don't check for completion - only terminate when scheduler sends termination message
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 continue;
             }
             else{

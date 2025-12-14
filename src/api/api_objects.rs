@@ -300,4 +300,57 @@ impl SubmittedJobs {
         println!("All job IDs: {:?}", all_job_ids);
         println!("===========================");
     }
+
+    pub async fn reset_submitted_jobs(&self) {
+        let mut pending = self.pending_job_ids.lock().await;
+        pending.clear();
+        drop(pending);
+        
+        let mut reschedule = self.reschedule_job_ids.lock().await;
+        reschedule.clear();
+        drop(reschedule);
+        
+        let mut successfull = self.successfull_job_ids.lock().await;
+        successfull.clear();
+        drop(successfull);
+        
+        let mut failed = self.failed_job_ids.lock().await;
+        failed.clear();
+        drop(failed);
+    }
+
+    /// Check if all jobs are completed and can terminate
+    /// Returns true if:
+    /// - jobs list is empty AND
+    /// - (successfull_job_ids.len() > 0 OR failed_job_ids.len() > 0) AND
+    /// - pending_job_ids is empty
+    /// OR
+    /// - jobs list is not empty AND
+    /// - all jobs in the list are either in successful_job_ids or failed_job_ids
+    pub async fn check_for_termination(&self) -> bool {
+        let jobs = self.jobs.lock().await;
+        let pending = self.pending_job_ids.lock().await;
+        let successfull = self.successfull_job_ids.lock().await;
+        let failed = self.failed_job_ids.lock().await;
+        
+        // Case 1: Jobs list is empty - check if all jobs completed and were removed
+        if jobs.is_empty() {
+            // Check if pending is empty
+            if !pending.is_empty() {
+                return false;
+            }
+            
+            // Check if we have any successful or failed jobs
+            let has_completed_jobs = !successfull.is_empty() || !failed.is_empty();
+            return has_completed_jobs;
+        }
+        
+        // Case 2: Jobs list is not empty - check if all jobs are in successful or failed sets
+        // Check if all job IDs are in either successful or failed sets
+        let all_in_success_or_failed = jobs.iter().all(|job| {
+            successfull.contains(&job.id) || failed.contains(&job.id)
+        });
+        
+        all_in_success_or_failed
+    }
 }

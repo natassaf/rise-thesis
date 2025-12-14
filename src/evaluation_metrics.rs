@@ -80,6 +80,7 @@ impl EvaluationMetrics {
         let completed_count = self.get_completed_count().await;
         let total_tasks = self.get_total_tasks().await;
         total_tasks > 0 && completed_count > 0 && completed_count == total_tasks
+
     }
     pub fn set_execution_start_time(&self, start_time: Instant) {
         *self.execution_start_time.lock().unwrap() = Some(start_time);
@@ -179,6 +180,7 @@ pub async fn set_task_status(&self, task_id: String, status: u8) {
         self.task_status.lock().await.clear();
         *self.completed_count.lock().await = 0;
         self.response_time_per_task.lock().unwrap().clear();
+        
     }
 }
 

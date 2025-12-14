@@ -29,14 +29,19 @@ pub async fn handle_execute_tasks(
     evaluation_metrics: web::Data<Arc<EvaluationMetrics>>,
     jobs_logs:web::Data<SubmittedJobs>,
     workers_notification_channel: web::Data<Arc<Notify>>,
+    // request_running_flag:web::Data<Mutex<bool>>
 ) -> impl Responder {
     let task_ids: Vec<String> = jobs_logs.get_jobs().await.iter().map(|j| j.id.clone()).collect();
- 
+
     // if no tasks were submitted don't notify the worker to start looping
-    if !task_ids.is_empty(){
+    // let mut running_flag = request_running_flag.lock().await;
+    if !task_ids.is_empty() {
+        // *running_flag = true;
         evaluation_metrics.initialize(task_ids).await;
         workers_notification_channel.notify_waiters();
+
     }
+
     HttpResponse::Ok().body(format!("Executing tasks"))
 }
 

@@ -48,11 +48,11 @@ async fn main() -> std::io::Result<()> {
     // Global shutdown flag
     static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false); // used to shutdown the workers and scheduler running on the background
 
-
     // Initialize the app data
     let jobs_log: web::Data<SubmittedJobs> = web::Data::new(SubmittedJobs::new());
     let workers_notification_channel = Arc::new(Notify::new());
     let evaluation_metrics = Arc::new(EvaluationMetrics::new());
+    let request_running_flag = web::Data::new(Mutex::new(false));
     
     // Create and start scheduler. Scheduler
     let scheduler = {
@@ -93,6 +93,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(workers_notification_channel.clone()))
             .app_data(web::Data::new(evaluation_metrics.clone()))
             .app_data(jobs_order_optimizer.clone());
+            // .app_data(request_running_flag.clone());
 
         app = app.route("/submit_task", web::post().to(handle_submit_task));
         app = app.route("/get_result", web::get().to(handle_get_result));

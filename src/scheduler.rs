@@ -8,6 +8,7 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use crate::api::api_objects::{Job, SubmittedJobs};
 use crate::channel_objects::{JobAskStatus, JobType, Message, TaskStatusMessage, ToSchedulerMessage, ToWorkerMessage};
 use crate::evaluation_metrics::EvaluationMetrics;
+use crate::utils::load_config;
 use crate::{
     channel_objects::MessageType,
     worker::Worker,
@@ -334,28 +335,18 @@ impl SchedulerEngine {
     }
     
     pub async fn check_for_termination(&self)->bool{
-        // Condition 1: All tasks completed (existing check)
-        let all_completed = self.evaluation_metrics.are_all_tasks_completed().await;
-        if all_completed {
-            return true;
-        }
-        
-        // Condition 2: All tasks are either in successful_job_ids or failed_job_ids
-        let jobs = self.submitted_jobs.jobs.lock().await;
-        let successfull_job_ids = self.submitted_jobs.successfull_job_ids.lock().await;
-        let failed_job_ids = self.submitted_jobs.failed_job_ids.lock().await;
-        
-        // If there are no jobs, return false (nothing to terminate)
-        if jobs.is_empty() {
+        // Check SubmittedJobs termination condition
+        // This handles both cases:
+        // 1. Jobs list is empty and all jobs completed (removed from list)
+        // 2. Jobs list is not empty but all jobs are in successful or failed sets
+        if !self.submitted_jobs.check_for_termination().await {
             return false;
         }
         
-        // Check if all job IDs are in either successful or failed sets
-        let all_in_success_or_failed = jobs.iter().all(|job| {
-            successfull_job_ids.contains(&job.id) || failed_job_ids.contains(&job.id)
-        });
-        
-        all_in_success_or_failed
+        // Also verify evaluation metrics indicate completion
+        // Evaluation metrics are reset when a new batch starts, so they're always fresh
+        let all_completed = self.evaluation_metrics.are_all_tasks_completed().await;
+        all_completed
     }
 
     pub async fn create_termination_message(&self)->Result<Message, anyhow::Error>{
@@ -529,6 +520,50 @@ impl SchedulerEngine {
         }
     }
 
+    pub async fn reset_for_new_batch(&self) {
+        // Reset all scheduler state variables for a new batch of tasks
+        println!("Scheduler: Resetting state for new batch");
+        
+        // Completely reinitialize evaluation metrics to avoid stale state
+        self.evaluation_metrics.reset().await;
+        println!("Scheduler: Reset evaluation metrics");
+        
+        // Clear consecutive NotFound counts
+        let mut not_found_count = self.consecutive_not_found_count.lock().await;
+        not_found_count.clear();
+        drop(not_found_count);
+        
+        // Reset sequential run flag
+        let mut sequential_flag = self.sequential_run_flag.lock().await;
+        *sequential_flag = false;
+        drop(sequential_flag);
+        
+        // Reset active workers to include all workers
+        let mut active_workers = self.active_workers.lock().await;
+        active_workers.clear();
+        for worker in &self.workers {
+            active_workers.push(worker.worker_id);
+        }
+        println!("Scheduler: Reset active_workers to include all {} workers", active_workers.len());
+        drop(active_workers);
+        
+        // Reset worker requests
+        let mut worker_requests = self.worker_requests.lock().await;
+        worker_requests.clear();
+        drop(worker_requests);
+        
+        // Reset SubmittedJobs state
+        self.submitted_jobs.reset_submitted_jobs().await;
+
+        for worker in self.workers.iter() {
+            let config = load_config();
+            let num_consurrent_tasks = config.num_concurrent_tasks.unwrap_or(1);
+            worker.set_num_concurrent_tasks(num_consurrent_tasks).await;
+        }
+        
+        println!("Scheduler: State reset complete for new batch");
+    }
+
     async fn move_pending_back_to_reschedule(&self){
         // Move all jobs from pending_job_ids back to reschedule_job_ids
         // This happens when sequential mode is activated, so these jobs can be retried sequentially
@@ -608,16 +643,15 @@ impl SchedulerEngine {
             }
             let all_in_reschedule = self.submitted_jobs.are_all_jobs_in_reschedule().await;
             let sequential_run_flag = *self.sequential_run_flag.lock().await;
-            
-            // Check if all active workers have count > 2 and activate sequential mode
-            self.check_and_activate_sequential_mode().await;
-            
+        
+    
             if all_in_reschedule && sequential_run_flag==false {
                 self.activate_sequential_mode().await;
             }
             
 
             // check for termination
+            // Note: check_for_termination handles both cases: jobs in queue and jobs completed (removed from queue)
             if self.check_for_termination().await {
                 let completed_count = self.evaluation_metrics.get_completed_count().await;
                 let total_tasks = self.evaluation_metrics.get_total_tasks().await;
@@ -633,9 +667,13 @@ impl SchedulerEngine {
                 println!("Scheduler: All tasks completed! Sending termination messages to all workers...");
                 self.broadcast_termination_message().await.unwrap();
                 
-                // Don't reset metrics here - they may be needed for final reporting
-                // Metrics will be reset when a new batch starts
-                break; // Exit the loop to prevent re-checking termination with reset metrics
+                // Reset scheduler state for next batch
+                self.reset_for_new_batch().await;
+                
+                // Don't break - continue the loop to wait for new tasks
+                // The loop will continue and process new tasks when they arrive
+                println!("Scheduler: Waiting for new tasks...");
+                // Continue the loop instead of breaking
             }
         }
     }
