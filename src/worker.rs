@@ -38,7 +38,7 @@ pub struct Worker {
     component_cache: Arc<ComponentCache>, // Shared component cache (for compilation)
     workers_notification_channel: Arc<Notify>, 
     evaluation_metrics: Arc<EvaluationMetrics>, // Reference to evaluation metrics
-    num_concurrent_tasks: usize,
+    num_concurrent_tasks: Arc<Mutex<usize>>, // Mutable to allow changing in sequential mode
     task_memory_map: Arc<HashMap<String, usize>>, // HashMap of task_id -> memory_kb
 }
 
@@ -77,9 +77,15 @@ impl Worker {
             component_cache,
             workers_notification_channel,
             evaluation_metrics,
-            num_concurrent_tasks,
+            num_concurrent_tasks: Arc::new(Mutex::new(num_concurrent_tasks)),
             task_memory_map,
         }
+    }
+
+    /// Set num_concurrent_tasks (used in sequential mode)
+    pub async fn set_num_concurrent_tasks(&self, num: usize) {
+        let mut num_tasks = self.num_concurrent_tasks.lock().await;
+        *num_tasks = num;
     }
 
     /// Load task_to_memory_kb.csv into a HashMap
@@ -419,11 +425,12 @@ impl Worker {
                             Ok(to_worker_msg) => match to_worker_msg.status {
                                 JobAskStatus::Found => {
                                     tasks.push(to_worker_msg.job);
+                                    let num_tasks = *self.num_concurrent_tasks.lock().await;
                                     println!(
                                         "Worker {}: Received job from scheduler ({} of {})",
                                         self.worker_id,
                                         tasks.len(),
-                                        self.num_concurrent_tasks
+                                        num_tasks
                                     );
                                 }
                                 JobAskStatus::Terminate => {
@@ -623,11 +630,12 @@ impl Worker {
             // If no termination flag -> Send request for jobs message to scheduler
             if !termination_flag && tasks_to_process.is_empty() {
                 // Request tasks based on num_concurrent_tasks
-                if self.num_concurrent_tasks == 1 && !request_flag {
+                let num_tasks = *self.num_concurrent_tasks.lock().await;
+                if num_tasks == 1 && !request_flag {
                     self.request_tasks(JobType::Mixed).await;
                     sent_requests = 1;
                     request_flag = true;
-                } else if self.num_concurrent_tasks == 2 && !request_flag {
+                } else if num_tasks == 2 && !request_flag {
                     self.request_tasks(JobType::IOBound).await;
                     self.request_tasks(JobType::CPUBound).await;
                     sent_requests = 2;

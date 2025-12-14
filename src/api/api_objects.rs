@@ -68,7 +68,9 @@ pub struct SubmittedJobs {
     pub io_bound_task_ids: Arc<Mutex<std::collections::HashSet<String>>>, // I/O-bound task IDs set
     pub cpu_bound_task_ids: Arc<Mutex<std::collections::HashSet<String>>>, // CPU-bound task IDs set
     pub pending_job_ids: Arc<Mutex<HashSet<String>>>,
-    pub reschedule: Arc<Mutex<HashSet<String>>>
+    pub reschedule_job_ids: Arc<Mutex<HashSet<String>>>,
+    pub successfull_job_ids: Arc<Mutex<HashSet<String>>>,
+    pub failed_job_ids: Arc<Mutex<HashSet<String>>>
 }
 
 impl SubmittedJobs {
@@ -81,8 +83,18 @@ impl SubmittedJobs {
             io_bound_task_ids: io_bound_set,
             cpu_bound_task_ids: cpu_bound_set,
             pending_job_ids: Arc::new(Mutex::new(HashSet::new())),
-            reschedule: Arc::new(Mutex::new(HashSet::new())),
+            reschedule_job_ids: Arc::new(Mutex::new(HashSet::new())),
+            successfull_job_ids: Arc::new(Mutex::new(HashSet::new())),
+            failed_job_ids: Arc::new(Mutex::new(HashSet::new()))
         }
+    }
+
+    pub async fn add_to_succesfull(&self, job_id:&str){
+        self.successfull_job_ids.lock().await.insert(job_id.to_string());
+    }
+
+    pub async fn add_to_failed(&self, job_id:&str){
+        self.failed_job_ids.lock().await.insert(job_id.to_string());
     }
 
     /// Set the I/O-bound task IDs set
@@ -110,7 +122,7 @@ impl SubmittedJobs {
         let mut pending = self.pending_job_ids.lock().await;
         if pending.remove(&job_id) {
             drop(pending); // Release the lock before acquiring the next one
-            let mut reschedule = self.reschedule.lock().await;
+            let mut reschedule = self.reschedule_job_ids.lock().await;
             reschedule.insert(job_id);
         }
     }
@@ -118,7 +130,7 @@ impl SubmittedJobs {
     /// Check if all jobs in the jobs vector are in the reschedule set
     pub async fn are_all_jobs_in_reschedule(&self) -> bool {
         let jobs = self.jobs.lock().await;
-        let reschedule = self.reschedule.lock().await;
+        let reschedule = self.reschedule_job_ids.lock().await;
         
         if jobs.is_empty() {
             return false;
@@ -145,10 +157,6 @@ impl SubmittedJobs {
             None
         } else {
             let job = jobs[0].clone();
-            let job_id = job.id.clone();
-            drop(jobs); // releasing lock
-            let mut pending = self.pending_job_ids.lock().await;
-            pending.insert(job_id);
             Some(job)
         }
     }
@@ -156,20 +164,35 @@ impl SubmittedJobs {
     /// Get the next I/O-bound job from the jobs list
     /// Returns a clone of the job without removing it from the queue
     /// The job will be removed when a success message is received
-    pub async fn get_next_io_bounded_job(&self, memory_capacity: usize) -> Option<Job> {
+    pub async fn get_next_io_bounded_job(&self, memory_capacity: usize, sequential_run_flag:bool) -> Option<Job> {
         let io_bound_task_ids = self.io_bound_task_ids.lock().await;
+        let pending_job_ids = self.pending_job_ids.lock().await;
+        let reschedule_job_ids = self.reschedule_job_ids.lock().await;
+        let failed_job_ids = self.failed_job_ids.lock().await;
         let jobs = self.jobs.lock().await;
         for i in 0..jobs.len() {
             if let Some((task_id, memory_pred)) = jobs.get(i).map(|job| (&job.id, &job.memory_prediction)) {
+                // Skip jobs that are already pending (being executed)
+                if pending_job_ids.contains(task_id) {
+                    continue;
+                }
+                // Skip jobs that have already failed (in sequential mode)
+                if failed_job_ids.contains(task_id) {
+                    continue;
+                }
+                // If sequential_run_flag is false, skip jobs in reschedule_job_ids
+                if !sequential_run_flag && reschedule_job_ids.contains(task_id) {
+                    continue;
+                }
                 let job_memory = memory_pred.unwrap_or(0.0) as usize;
                 if io_bound_task_ids.contains(task_id) && job_memory<=memory_capacity{
                     println!("job memore: {:?}, <=  memory_capacity: {:?}", job_memory, memory_capacity);
                     let job = jobs[i].clone();
-                    let job_id = job.id.clone();
                     drop(jobs); // releasing lock
                     drop(io_bound_task_ids); // releasing lock
-                    let mut pending = self.pending_job_ids.lock().await;
-                    pending.insert(job_id);
+                    drop(pending_job_ids); // releasing lock
+                    drop(reschedule_job_ids); // releasing lock
+                    drop(failed_job_ids); // releasing lock
                     return Some(job);
                 }
             }
@@ -183,20 +206,35 @@ impl SubmittedJobs {
     /// Get the next CPU-bound job from the jobs list
     /// Returns a clone of the job without removing it from the queue
     /// The job will be removed when a success message is received
-    pub async fn get_next_cpu_bounded_job(&self, memory_capacity: usize) -> Option<Job> {
+    pub async fn get_next_cpu_bounded_job(&self, memory_capacity: usize, sequential_run_flag:bool) -> Option<Job> {
         let cpu_bound_task_ids = self.cpu_bound_task_ids.lock().await;
+        let pending_job_ids = self.pending_job_ids.lock().await;
+        let reschedule_job_ids = self.reschedule_job_ids.lock().await;
+        let failed_job_ids = self.failed_job_ids.lock().await;
         let jobs = self.jobs.lock().await;
         for i in 0..jobs.len() {
             if let Some((task_id, memory_pred)) = jobs.get(i).map(|job| (&job.id, &job.memory_prediction)) {
+                // Skip jobs that are already pending (being executed)
+                if pending_job_ids.contains(task_id) {
+                    continue;
+                }
+                // Skip jobs that have already failed (in sequential mode)
+                if failed_job_ids.contains(task_id) {
+                    continue;
+                }
+                // If sequential_run_flag is false, skip jobs in reschedule_job_ids
+                if !sequential_run_flag && reschedule_job_ids.contains(task_id) {
+                    continue;
+                }
                 let job_memory = memory_pred.unwrap_or(0.0) as usize;
                 if cpu_bound_task_ids.contains(task_id) && job_memory<=memory_capacity {
                     println!("job memore: {:?}, <=  memory_capacity: {:?}", job_memory, memory_capacity);
                     let job = jobs[i].clone();
-                    let job_id = job.id.clone();
                     drop(jobs); // releasing lock
                     drop(cpu_bound_task_ids); // releasing lock
-                    let mut pending = self.pending_job_ids.lock().await;
-                    pending.insert(job_id);
+                    drop(pending_job_ids); // releasing lock
+                    drop(reschedule_job_ids); // releasing lock
+                    drop(failed_job_ids); // releasing lock
                     return Some(job);
                 }
             }
@@ -206,17 +244,33 @@ impl SubmittedJobs {
 
      /// Get the next job from the jobs list
     /// The job will be removed when a success message is received
-    pub async fn get_next_job(&self, memory_capacity: usize) -> Option<Job> {
+    pub async fn get_next_job(&self, memory_capacity: usize, sequential_run_flag:bool) -> Option<Job> {
+        let pending_job_ids = self.pending_job_ids.lock().await;
+        let reschedule_job_ids = self.reschedule_job_ids.lock().await;
+        let failed_job_ids = self.failed_job_ids.lock().await;
         let jobs = self.jobs.lock().await;
         for i in 0..jobs.len() {
+            let job_id = &jobs[i].id;
+            // Skip jobs that are already pending (being executed)
+            if pending_job_ids.contains(job_id) {
+                continue;
+            }
+            // Skip jobs that have already failed (in sequential mode)
+            if failed_job_ids.contains(job_id) {
+                continue;
+            }
+            // If sequential_run_flag is false, skip jobs in reschedule_job_ids
+            if !sequential_run_flag && reschedule_job_ids.contains(job_id) {
+                continue;
+            }
             let job_memory = jobs[i].memory_prediction.unwrap_or(0.0) as usize;
             if job_memory<=memory_capacity {
                 println!("job memore: {:?}, <=  memory_capacity: {:?}", job_memory, memory_capacity);
                 let job = jobs[i].clone();
-                let job_id = job.id.clone();
                 drop(jobs); // releasing lock
-                let mut pending = self.pending_job_ids.lock().await;
-                pending.insert(job_id);
+                drop(pending_job_ids); // releasing lock
+                drop(reschedule_job_ids); // releasing lock
+                drop(failed_job_ids); // releasing lock
                 return Some(job);
             }
         }
@@ -225,5 +279,25 @@ impl SubmittedJobs {
     pub async fn add_task(&self, task: Job) {
         let mut guard = self.jobs.lock().await;
         guard.push(task);
+    }
+
+    pub async fn print_status(&self) {
+        let jobs = self.jobs.lock().await;
+        let pending_job_ids = self.pending_job_ids.lock().await;
+        let reschedule_job_ids = self.reschedule_job_ids.lock().await;
+        let successfull_job_ids = self.successfull_job_ids.lock().await;
+        let failed_job_ids = self.failed_job_ids.lock().await;
+
+        println!("=== SubmittedJobs Status ===");
+        println!("Total jobs: {}", jobs.len());
+        println!("Pending job IDs ({}): {:?}", pending_job_ids.len(), pending_job_ids);
+        println!("Reschedule job IDs ({}): {:?}", reschedule_job_ids.len(), reschedule_job_ids);
+        println!("Successful job IDs ({}): {:?}", successfull_job_ids.len(), successfull_job_ids);
+        println!("Failed job IDs ({}): {:?}", failed_job_ids.len(), failed_job_ids);
+        
+        // Print all job IDs for reference
+        let all_job_ids: Vec<String> = jobs.iter().map(|job| job.id.clone()).collect();
+        println!("All job IDs: {:?}", all_job_ids);
+        println!("===========================");
     }
 }
