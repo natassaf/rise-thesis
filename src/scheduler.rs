@@ -1,6 +1,6 @@
 use std::ops::Add;
 use std::sync::Arc;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::time::Duration;
 use anyhow::Error;
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -27,7 +27,8 @@ pub struct SchedulerEngine {
     pin_cores: bool,
     worker_requests: Arc<Mutex<HashSet<usize>>>, // Track which workers have sent job requests
     sequential_run_flag: Arc<Mutex<bool>>, // when true run all remaining jobs on one worker
-    active_workers: Arc<Mutex<Vec<usize>>>
+    active_workers: Arc<Mutex<Vec<usize>>>,
+    consecutive_not_found_count: Arc<Mutex<HashMap<usize, usize>>>, // Track consecutive NotFound responses per worker
 }
 
 
@@ -81,7 +82,8 @@ impl SchedulerEngine {
             pin_cores,
             worker_requests: Arc::new(Mutex::new(HashSet::new())),
             sequential_run_flag: Arc::new(Mutex::new(false)) ,
-            active_workers: Arc::new(Mutex::new(Vec::new()))
+            active_workers: Arc::new(Mutex::new(Vec::new())),
+            consecutive_not_found_count: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -261,6 +263,12 @@ impl SchedulerEngine {
                         message_type: MessageType::ToWorkerMessage,
                     }
                 } else {
+                    // Job found - reset consecutive NotFound count for this worker
+                    let worker_id = to_scheduler_msg.worker_id;
+                    let mut not_found_count = self.consecutive_not_found_count.lock().await;
+                    not_found_count.insert(worker_id, 0); // Reset count
+                    drop(not_found_count);
+                    
                     let to_worker_msg = ToWorkerMessage{
                                 status: JobAskStatus::Found,
                                 job:this_job,
@@ -276,6 +284,14 @@ impl SchedulerEngine {
             None=>{
                 {
                     // No job found - just return NotFound
+                    // Increment consecutive NotFound count for this worker
+                    let worker_id = to_scheduler_msg.worker_id;
+                    let mut not_found_count = self.consecutive_not_found_count.lock().await;
+                    let count = not_found_count.entry(worker_id).or_insert(0);
+                    *count += 1;
+                    println!("Scheduler: Worker {} consecutive NotFound count: {}", worker_id, *count);
+                    drop(not_found_count);
+                    
                     // Don't check for termination here because jobs might still be in-flight with workers
                     // Termination will be checked after task completion in handle_incoming_message
                     let to_worker_msg = ToWorkerMessage {
@@ -536,6 +552,42 @@ impl SchedulerEngine {
         }
     }
 
+    async fn activate_sequential_mode(&self) {
+        // Terminate all workers except worker 0
+        let workers_to_terminate: Vec<usize> = (1..self.workers.len()).map(|i| self.workers[i].worker_id).collect();
+        if let Err(e) = self.send_termination_message(workers_to_terminate.clone()).await {
+            eprintln!("Scheduler: Error sending termination message: {:?}", e);
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        
+        // Remove terminated workers from active_workers
+        let mut w = self.active_workers.lock().await;
+        // Remove terminated workers by value, not by index
+        for worker_id in &workers_to_terminate {
+            w.retain(|&id| id != *worker_id);
+        }
+        // Ensure worker 0 is in active_workers (it's the only active worker in sequential mode)
+        if !w.contains(&0) {
+            w.push(0);
+            println!("Scheduler: Added worker 0 to active_workers for sequential mode");
+        }
+        drop(w);
+
+        // Set worker 0's num_concurrent_tasks to 1 for sequential execution
+        if let Some(worker_0) = self.workers.get(0) {
+            worker_0.set_num_concurrent_tasks(1).await;
+            println!("Scheduler: Set worker 0's num_concurrent_tasks to 1 for sequential execution");
+        }
+
+        self.move_pending_back_to_reschedule().await;
+        
+        self.submitted_jobs.print_status().await;
+
+        let mut flag = self.sequential_run_flag.lock().await;
+        println!("Sequential flag set to true");
+        *flag = true;
+    }
+
     pub async fn start(&mut self) {
         // Start loop to receive messages from workers
         let mut rx = self.scheduler_channel_rx.lock().await;
@@ -557,37 +609,11 @@ impl SchedulerEngine {
             let all_in_reschedule = self.submitted_jobs.are_all_jobs_in_reschedule().await;
             let sequential_run_flag = *self.sequential_run_flag.lock().await;
             
+            // Check if all active workers have count > 2 and activate sequential mode
+            self.check_and_activate_sequential_mode().await;
+            
             if all_in_reschedule && sequential_run_flag==false {
-                let workers_to_terminate: Vec<usize> = (1..self.workers.len()).map(|i| self.workers[i].worker_id).collect();
-                if let Err(e) = self.send_termination_message(workers_to_terminate.clone()).await {
-                    eprintln!("Scheduler: Error sending termination message: {:?}", e);
-                }
-                tokio::time::sleep(Duration::from_secs(3)).await;
-                let mut w = self.active_workers.lock().await;
-                // Remove terminated workers by value, not by index
-                for worker_id in &workers_to_terminate {
-                    w.retain(|&id| id != *worker_id);
-                }
-                // Ensure worker 0 is in active_workers (it's the only active worker in sequential mode)
-                if !w.contains(&0) {
-                    w.push(0);
-                    println!("Scheduler: Added worker 0 to active_workers for sequential mode");
-                }
-                drop(w);
-
-                // Set worker 0's num_concurrent_tasks to 1 for sequential execution
-                if let Some(worker_0) = self.workers.get(0) {
-                    worker_0.set_num_concurrent_tasks(1).await;
-                    println!("Scheduler: Set worker 0's num_concurrent_tasks to 1 for sequential execution");
-                }
-
-                self.move_pending_back_to_reschedule().await;
-                
-                self.submitted_jobs.print_status().await;
-
-                let mut flag = self.sequential_run_flag.lock().await;
-                println!("Sequential flag set to true");
-                *flag = true;
+                self.activate_sequential_mode().await;
             }
             
 
