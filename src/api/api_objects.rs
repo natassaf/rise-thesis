@@ -353,4 +353,19 @@ impl SubmittedJobs {
         
         all_in_success_or_failed
     }
+
+    /// Print termination report showing job statistics
+    pub async fn termination_report(&self) {
+        let jobs = self.jobs.lock().await;
+        let pending = self.pending_job_ids.lock().await;
+        let successfull = self.successfull_job_ids.lock().await;
+        let failed = self.failed_job_ids.lock().await;
+
+        println!("=== Termination Report ===");
+        println!("Number of jobs failed: {}", failed.len());
+        println!("Number of jobs succeeded: {}", successfull.len());
+        println!("Number of jobs in submitted jobs: {}", jobs.len());
+        println!("Number of jobs pending: {}", pending.len());
+        println!("==========================");
+    }
 }

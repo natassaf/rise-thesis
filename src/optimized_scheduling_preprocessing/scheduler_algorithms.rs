@@ -171,7 +171,7 @@ impl SchedulerAlgorithm for Improvement1{
         // Configuration: batch size for predictions
         const BATCH_SIZE: usize = 20;
 
-        // for each job predict memory and time requirements
+        // for each job predict time requirements
         let jobs = submitted_jobs.get_jobs().await;
 
         if jobs.is_empty() {
@@ -185,7 +185,7 @@ impl SchedulerAlgorithm for Improvement1{
         let feature_results = self.utils.extract_features_parallel(&jobs);
 
         // Process predictions in batches
-        let (job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type) =
+        let (_job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type) =
             self.utils.process_predictions_in_batches(&feature_results, BATCH_SIZE).await;
 
         let total_duration = total_start.elapsed();
@@ -203,18 +203,11 @@ impl SchedulerAlgorithm for Improvement1{
         )
         .unwrap_or_else(|e| eprintln!("Failed to write timing: {:?}", e));
 
-        println!(
-            "job_id_to_memory_prediction: {:?}",
-            job_id_to_memory_prediction
-        );
         println!("job_id_to_time_prediction: {:?}", job_id_to_time_prediction);
 
-        // Update jobs with memory, time predictions, and task bound type in parallel
+        // Update jobs with time predictions and task bound type in parallel
         let mut jobs = submitted_jobs.jobs.lock().await;
         jobs.par_iter_mut().for_each(|job| {
-            if let Some(prediction) = job_id_to_memory_prediction.get(&job.id) {
-                job.memory_prediction = Some(*prediction);
-            }
             if let Some(prediction) = job_id_to_time_prediction.get(&job.id) {
                 job.execution_time_prediction = Some(*prediction);
             }
@@ -285,7 +278,7 @@ impl SchedulerAlgorithm for Improvement1{
         // Configuration: batch size for predictions
         const BATCH_SIZE: usize = 20;
 
-        // for each job predict memory and time requirements
+        // for each job predict time requirements
         let jobs = submitted_jobs.get_jobs().await;
         let job_ids_before: Vec<_> = submitted_jobs
             .get_jobs()
@@ -305,7 +298,7 @@ impl SchedulerAlgorithm for Improvement1{
         let feature_results = self.utils.extract_features_parallel(&jobs);
 
         // Process predictions in batches
-        let (job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type) =
+        let (_job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type) =
             self.utils.process_predictions_in_batches(&feature_results, BATCH_SIZE).await;
 
         let total_duration = total_start.elapsed();
@@ -323,18 +316,11 @@ impl SchedulerAlgorithm for Improvement1{
         )
         .unwrap_or_else(|e| eprintln!("Failed to write timing: {:?}", e));
 
-        println!(
-            "job_id_to_memory_prediction: {:?}",
-            job_id_to_memory_prediction
-        );
         println!("job_id_to_time_prediction: {:?}", job_id_to_time_prediction);
 
-        // Update jobs with memory, time predictions, and task bound type in parallel
+        // Update jobs with time predictions and task bound type in parallel
         let mut jobs = submitted_jobs.jobs.lock().await;
         jobs.par_iter_mut().for_each(|job| {
-            if let Some(prediction) = job_id_to_memory_prediction.get(&job.id) {
-                job.memory_prediction = Some(*prediction);
-            }
             if let Some(prediction) = job_id_to_time_prediction.get(&job.id) {
                 job.execution_time_prediction = Some(*prediction);
             }
@@ -343,27 +329,14 @@ impl SchedulerAlgorithm for Improvement1{
             }
         });
 
-        // Sort jobs:
-        // 1. First by execution time from largest to shortest (descending)
-        // 2. Then by memory prediction from shortest to largest (ascending)
-        // This way, when we pop() from the end, we get the job with shortest time and largest memory
+        // Sort jobs by execution time from largest to shortest (descending)
+        // This way, when we pop() from the end, we get the job with shortest time
         jobs.sort_by(|a, b| {
             let a_time = a.execution_time_prediction.unwrap_or(0.0);
             let b_time = b.execution_time_prediction.unwrap_or(0.0);
-            let a_mem = a.memory_prediction.unwrap_or(0.0);
-            let b_mem = b.memory_prediction.unwrap_or(0.0);
 
-            // First sort by execution time: descending (shortest first, largest last)
-            match a_time.partial_cmp(&b_time) {
-                Some(std::cmp::Ordering::Equal) => {
-                    // If execution times are equal, sort by memory: ascending (smallest first, largest last)
-                    a_mem
-                        .partial_cmp(&b_mem)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                }
-                Some(ordering) => ordering,
-                None => std::cmp::Ordering::Equal,
-            }
+            // Sort by execution time: descending (shortest first, largest last)
+            a_time.partial_cmp(&b_time).unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Use the jobs we already have locked instead of calling get_jobs() again

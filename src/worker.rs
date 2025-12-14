@@ -312,11 +312,8 @@ impl Worker {
             }
         };
 
-        evaluation_metrics
-            .set_task_status(completed_task_id.clone(), 1)
-            .await;
-
         // Send success status
+        // Note: Task status is set in the scheduler when it receives this message
         self.send_task_status(completed_task_id.clone(), Status::Success).await;
 
         // // Check if all tasks are completed

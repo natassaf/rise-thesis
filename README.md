@@ -23,7 +23,7 @@ Three more repositories were used to create this project:
 
 ### To run this repo  on  Raspberry Pi 5 with Ubuntu
 
-Cross compilation didn't work on macOS due to the `ort` dependency that fails. Until this dependency issue is solved, the way to run it is:
+Cross compilation didn't work on macOS due to the `ort` dependency that fails. Until this dependency issue is solved, the way to run this is:
 
 1. Find the IP of your Raspberry Pi and connect via SSH:
    ```bash

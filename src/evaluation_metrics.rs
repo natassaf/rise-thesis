@@ -130,11 +130,12 @@ impl EvaluationMetrics {
 
 pub async fn set_task_status(&self, task_id: String, status: u8) {
     let mut task_status = self.task_status.lock().await;
-    let was_already_completed = task_status.get(&task_id).copied() == Some(1);
+    let previous_status = task_status.get(&task_id).copied().unwrap_or(0);
     task_status.insert(task_id, status);
     
-    // Only increment if task wasn't already completed
-    if !was_already_completed && status == 1 {
+    // Increment completed count if task moves from unprocessed (0) to any processed status (1=success, 2=failed)
+    // This ensures both successful and failed jobs are counted as completed
+    if previous_status == 0 && status != 0 {
         *self.completed_count.lock().await += 1;
     }
 }

@@ -446,6 +446,11 @@ impl SchedulerEngine {
                 let sequential_run_flag = *self.sequential_run_flag.lock().await;
                 match task_status_message.status {
                     crate::channel_objects::Status::Success => {
+                        // Update evaluation metrics: mark task as completed (success)
+                        // Note: Worker also sets this, but we set it here for consistency with failed jobs
+                        // Using status=1 to indicate success
+                        self.evaluation_metrics.set_task_status(task_status_message.job_id.clone(), 1).await;
+                        
                         // Remove from pending_job_ids and add to successfull_job_ids
                         let mut pending = self.submitted_jobs.pending_job_ids.lock().await;
                         let was_in_pending = pending.remove(&task_status_message.job_id);
@@ -461,6 +466,10 @@ impl SchedulerEngine {
                         println!("Scheduler: Task {} succeeded, moved to successful", task_status_message.job_id);
                     },
                     crate::channel_objects::Status::Failed => {
+                        // Update evaluation metrics: mark task as completed (failed)
+                        // Use status=2 to indicate failure (1=success, 2=failed)
+                        self.evaluation_metrics.set_task_status(task_status_message.job_id.clone(), 2).await;
+                        
                         // Remove from pending_job_ids first
                         let mut pending = self.submitted_jobs.pending_job_ids.lock().await;
                         let was_in_pending = pending.remove(&task_status_message.job_id);
@@ -482,7 +491,9 @@ impl SchedulerEngine {
                             // If it's in reschedule, skip adding to failed because it will be retried
                             if !was_in_reschedule {
                                 self.submitted_jobs.add_to_failed(&task_status_message.job_id).await;
-                                println!("Scheduler: Task {} failed, moved to failed_job_ids (sequential mode, not in reschedule)", task_status_message.job_id);
+                                // Remove from jobs list when it goes to failed_job_ids
+                                self.submitted_jobs.remove_job(task_status_message.job_id.clone()).await;
+                                println!("Scheduler: Task {} failed, moved to failed_job_ids and removed from jobs list (sequential mode, not in reschedule)", task_status_message.job_id);
                             } else {
                                 println!("Scheduler: Task {} failed but is in reschedule, will be retried (not added to failed_job_ids)", task_status_message.job_id);
                             }
@@ -657,6 +668,9 @@ impl SchedulerEngine {
                 let total_tasks = self.evaluation_metrics.get_total_tasks().await;
                 println!("Scheduler: Termination check - completed: {}, total: {}, match: {}", 
                         completed_count, total_tasks, completed_count == total_tasks);
+                
+                // Print termination report
+                self.submitted_jobs.termination_report().await;
                 
                 // Print evaluation metrics before resetting
                 self.evaluation_metrics.all_tasks_completed_callback().await;
