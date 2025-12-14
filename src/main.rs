@@ -10,7 +10,7 @@ pub mod jobs_order_optimizer;
 mod memory_monitoring;
 
 use crate::api::api_handlers::{
-    handle_execute_tasks, handle_get_result, handle_kill, handle_predict_and_sort,
+    handle_execute_tasks, handle_generate_predictions, handle_get_result, handle_kill, handle_predict_and_sort,
     handle_submit_task,
 };
 use crate::api::api_objects::SubmittedJobs;
@@ -98,6 +98,7 @@ async fn main() -> std::io::Result<()> {
         app = app.route("/submit_task", web::post().to(handle_submit_task));
         app = app.route("/get_result", web::get().to(handle_get_result));
         app = app.route("/predict_and_sort", web::post().to(handle_predict_and_sort));
+        app = app.route("/generate_predictions", web::post().to(handle_generate_predictions));
         app = app.route("/run_tasks", web::post().to(handle_execute_tasks));
         app = app.route("/kill", web::get().to(handle_kill));
         app

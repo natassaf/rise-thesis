@@ -1,0 +1,27 @@
+{
+  "test_case_fib_opt16": {
+    "memory_prediction": 25305.828125,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt14": {
+    "memory_prediction": 25305.59375,
+    "time_prediction": 0.506316065788269,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt18": {
+    "memory_prediction": 25305.57421875,
+    "time_prediction": 0.506316065788269,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt5": {
+    "memory_prediction": 25305.984375,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt3": {
+    "memory_prediction": 25306.01953125,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  }
+}

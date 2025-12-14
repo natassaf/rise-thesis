@@ -1,9 +1,12 @@
 use crate::api::api_objects::{ExecuteTasksRequest, Job, SubmittedJobs, TaskQuery, WasmJobRequest};
 use crate::evaluation_metrics::{EvaluationMetrics};
 use crate::jobs_order_optimizer::{JobsOrderOptimizer};
+use crate::optimized_scheduling_preprocessing::features_extractor::TaskBoundType;
 use actix_web::{HttpResponse, Responder, web};
 use std::sync::Arc;
+use std::collections::HashMap;
 use tokio::sync::{Mutex, Notify};
+use serde::{Deserialize, Serialize};
 
 pub async fn handle_kill(
     app_data: web::Data<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>>,
@@ -89,4 +92,77 @@ pub async fn handle_submit_task(
         submitted_tasks.get_num_tasks().await
     );
     HttpResponse::Ok().body("Task submitted")
+}
+
+#[derive(Serialize, Deserialize)]
+struct PredictionData {
+    memory_prediction: f64,
+    time_prediction: f64,
+    task_bound_type: TaskBoundType,
+}
+
+/// Generate predictions for all submitted jobs and save to file
+pub async fn handle_generate_predictions(
+    _app_data: web::Data<Arc<Mutex<JobsOrderOptimizer>>>,
+    submitted_jobs: web::Data<SubmittedJobs>,
+) -> impl Responder {
+    const BATCH_SIZE: usize = 20;
+    const PREDICTIONS_FILE: &str = "feature_predictions/predictions.json";
+
+    let jobs = submitted_jobs.get_jobs().await;
+    
+    if jobs.is_empty() {
+        return HttpResponse::BadRequest().body("No jobs submitted");
+    }
+
+    println!("Generating predictions for {} jobs", jobs.len());
+
+    // Create utils instance to extract features and run predictions
+    use crate::optimized_scheduling_preprocessing::scheduler_algorithms::SchedulerAlgorithmUtils;
+    let utils = SchedulerAlgorithmUtils::new();
+
+    // Extract features for all jobs in parallel
+    let feature_results = utils.extract_features_parallel(&jobs);
+
+    // Process predictions in batches
+    let (job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type) =
+        utils.process_predictions_in_batches(&feature_results, BATCH_SIZE).await;
+
+    // Combine predictions into a single HashMap
+    let mut predictions: HashMap<String, PredictionData> = HashMap::new();
+    
+    for job_id in job_id_to_memory_prediction.keys() {
+        let memory_pred = job_id_to_memory_prediction.get(job_id).copied().unwrap_or(0.0);
+        let time_pred = job_id_to_time_prediction.get(job_id).copied().unwrap_or(0.0);
+        let bound_type = job_id_to_task_bound_type.get(job_id).copied().unwrap_or(TaskBoundType::Mixed);
+        
+        predictions.insert(
+            job_id.clone(),
+            PredictionData {
+                memory_prediction: memory_pred,
+                time_prediction: time_pred,
+                task_bound_type: bound_type,
+            },
+        );
+    }
+
+    // Save to JSON file
+    let json_str = match serde_json::to_string_pretty(&predictions) {
+        Ok(s) => s,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to serialize predictions: {}", e)),
+    };
+    
+    // Ensure results directory exists
+    if let Err(e) = std::fs::create_dir_all("results") {
+        return HttpResponse::InternalServerError().body(format!("Failed to create results directory: {}", e));
+    }
+    
+    if let Err(e) = std::fs::write(PREDICTIONS_FILE, json_str) {
+        return HttpResponse::InternalServerError().body(format!("Failed to write predictions file: {}", e));
+    }
+
+    println!("Predictions saved to {}", PREDICTIONS_FILE);
+    println!("Generated predictions for {} jobs", predictions.len());
+
+    HttpResponse::Ok().body(format!("Predictions generated and saved to {}", PREDICTIONS_FILE))
 }

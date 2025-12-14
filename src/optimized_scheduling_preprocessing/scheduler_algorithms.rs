@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use actix_web::web;
 use async_trait::async_trait;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::api::api_objects::{Job, SubmittedJobs};
 use crate::optimized_scheduling_preprocessing::execution_time_prediction::time_prediction::predict_time_batch;
@@ -10,6 +11,34 @@ use crate::optimized_scheduling_preprocessing::features_extractor::{
 };
 use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction::predict_memory_batch;
 use crate::optimized_scheduling_preprocessing::memory_prediction::memory_prediction_utils::MemoryFeatures;
+
+#[derive(Serialize, Deserialize)]
+struct PredictionData {
+    memory_prediction: f64,
+    time_prediction: f64,
+    task_bound_type: TaskBoundType,
+}
+
+/// Load predictions from JSON file
+fn load_predictions_from_file(file_path: &str) -> Result<(HashMap<String, f64>, HashMap<String, f64>, HashMap<String, TaskBoundType>), String> {
+    let content = std::fs::read_to_string(file_path)
+        .map_err(|e| format!("Failed to read predictions file {}: {}", file_path, e))?;
+    
+    let predictions: HashMap<String, PredictionData> = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse predictions file: {}", e))?;
+    
+    let mut job_id_to_memory_prediction: HashMap<String, f64> = HashMap::new();
+    let mut job_id_to_time_prediction: HashMap<String, f64> = HashMap::new();
+    let mut job_id_to_task_bound_type: HashMap<String, TaskBoundType> = HashMap::new();
+    
+    for (job_id, pred_data) in predictions {
+        job_id_to_memory_prediction.insert(job_id.clone(), pred_data.memory_prediction);
+        job_id_to_time_prediction.insert(job_id.clone(), pred_data.time_prediction);
+        job_id_to_task_bound_type.insert(job_id, pred_data.task_bound_type);
+    }
+    
+    Ok((job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type))
+}
 
 /// Check how many jobs have changed index after sorting
 fn count_jobs_with_changed_index(job_ids_before: &[String], job_ids_after: &[String]) -> usize {
@@ -53,16 +82,16 @@ fn save_debug_memory_prediction(
 }
 
 #[derive(Debug, Clone)]
-struct SchedulerAlgorithmUtils{}
+pub struct SchedulerAlgorithmUtils{}
 
 impl SchedulerAlgorithmUtils{
 
-    fn new()->Self{
+    pub fn new()->Self{
         Self{}
     }
 
     /// Extract features for all jobs in parallel using rayon
-    fn extract_features_parallel(&self, jobs: &[Job]) -> Vec<(String, Vec<f32>, Vec<f32>, TaskBoundType)> {
+    pub fn extract_features_parallel(&self, jobs: &[Job]) -> Vec<(String, Vec<f32>, Vec<f32>, TaskBoundType)> {
         jobs.par_iter()
             .map(|job| {
                 let cwasm_file = job.binary_path.replace(".wasm", ".cwasm");
@@ -84,7 +113,7 @@ impl SchedulerAlgorithmUtils{
     }
     
     /// Process predictions in batches and return memory and time predictions
-    async fn process_predictions_in_batches(&self,
+    pub async fn process_predictions_in_batches(&self,
         feature_results: &[(String, Vec<f32>, Vec<f32>, TaskBoundType)],
         batch_size: usize,
     ) -> (
@@ -269,8 +298,8 @@ impl SchedulerAlgorithm for Improvement1{
     }
  }
 
- #[async_trait]
- impl SchedulerAlgorithm for Improvement2{
+#[async_trait]
+impl SchedulerAlgorithm for Improvement2{
     async fn prioritize_tasks(
         &self,
         submitted_jobs: &web::Data<SubmittedJobs>,
@@ -291,30 +320,39 @@ impl SchedulerAlgorithm for Improvement1{
             return (Vec::new(), Vec::new());
         }
 
-        // Measure total time for feature extraction and prediction
-        let total_start = std::time::Instant::now();
-
-        // Extract features for all jobs in parallel
-        let feature_results = self.utils.extract_features_parallel(&jobs);
-
-        // Process predictions in batches
-        let (_job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type) =
-            self.utils.process_predictions_in_batches(&feature_results, BATCH_SIZE).await;
-
-        let total_duration = total_start.elapsed();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        std::fs::write(
-            format!("results/timing_{}.txt", timestamp),
-            format!(
-                "Total time: {:.2}ms\nJobs: {}",
-                total_duration.as_secs_f64() * 1000.0,
-                jobs.len()
-            ),
-        )
-        .unwrap_or_else(|e| eprintln!("Failed to write timing: {:?}", e));
+        // Load predictions from file instead of computing them
+        const PREDICTIONS_FILE: &str = "feature_predictions/predictions.json";
+        
+        let (_job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type) = 
+            match load_predictions_from_file(PREDICTIONS_FILE) {
+                Ok(predictions) => {
+                    println!("Loaded predictions from {}", PREDICTIONS_FILE);
+                    (predictions.0, predictions.1, predictions.2)
+                }
+                Err(e) => {
+                    eprintln!("Failed to load predictions from file: {}. Falling back to computing predictions.", e);
+                    // Fallback to computing predictions if file doesn't exist
+                    let total_start = std::time::Instant::now();
+                    let feature_results = self.utils.extract_features_parallel(&jobs);
+                    let predictions = self.utils.process_predictions_in_batches(&feature_results, BATCH_SIZE).await;
+                    let total_duration = total_start.elapsed();
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    std::fs::write(
+                        format!("results/timing_{}.txt", timestamp),
+                        format!(
+                            "Total time: {:.2}ms\nJobs: {}",
+                            total_duration.as_secs_f64() * 1000.0,
+                            jobs.len()
+                        ),
+                    )
+                    .unwrap_or_else(|e| eprintln!("Failed to write timing: {:?}", e));
+                    println!("Computed predictions in {:.2}ms (fallback mode)", total_duration.as_secs_f64() * 1000.0);
+                    (predictions.0, predictions.1, predictions.2)
+                }
+            };
 
         println!("job_id_to_time_prediction: {:?}", job_id_to_time_prediction);
 
@@ -462,30 +500,26 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm {
             return (Vec::new(), Vec::new());
         }
 
-        // Measure total time for feature extraction and prediction
-        let total_start = std::time::Instant::now();
-
-        // Extract features for all jobs in parallel
-        let feature_results = self.utils.extract_features_parallel(&jobs);
-
-        // Process predictions in batches
-        let (job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type) =
-            self.utils.process_predictions_in_batches(&feature_results, BATCH_SIZE).await;
-
-        let total_duration = total_start.elapsed();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        std::fs::write(
-            format!("results/timing_{}.txt", timestamp),
-            format!(
-                "Total time: {:.2}ms\nJobs: {}",
-                total_duration.as_secs_f64() * 1000.0,
-                jobs.len()
-            ),
-        )
-        .unwrap_or_else(|e| eprintln!("Failed to write timing: {:?}", e));
+        // Load predictions from file instead of computing them
+        const PREDICTIONS_FILE: &str = "feature_predictions/predictions.json";
+        
+        let (job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type) = 
+            match load_predictions_from_file(PREDICTIONS_FILE) {
+                Ok(predictions) => {
+                    println!("Loaded predictions from {}", PREDICTIONS_FILE);
+                    predictions
+                }
+                Err(e) => {
+                    eprintln!("Failed to load predictions from file: {}. Falling back to computing predictions.", e);
+                    // Fallback to computing predictions if file doesn't exist
+                    let total_start = std::time::Instant::now();
+                    let feature_results = self.utils.extract_features_parallel(&jobs);
+                    let predictions = self.utils.process_predictions_in_batches(&feature_results, BATCH_SIZE).await;
+                    let total_duration = total_start.elapsed();
+                    println!("Computed predictions in {:.2}ms (fallback mode)", total_duration.as_secs_f64() * 1000.0);
+                    predictions
+                }
+            };
 
         println!(
             "job_id_to_memory_prediction: {:?}",
