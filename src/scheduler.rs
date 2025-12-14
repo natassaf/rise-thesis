@@ -598,6 +598,60 @@ impl SchedulerEngine {
         }
     }
 
+    async fn check_job_not_found_status(&self, threshold: usize) -> bool {
+        // Check if all active workers have consecutive_not_found_count greater than threshold
+        let active_workers = self.active_workers.lock().await;
+        let not_found_count = self.consecutive_not_found_count.lock().await;
+        
+        if active_workers.is_empty() {
+            drop(active_workers);
+            drop(not_found_count);
+            return false;
+        }
+        
+        let all_received_no_job = active_workers.iter().all(|&worker_id| {
+            not_found_count.get(&worker_id).copied().unwrap_or(0) > threshold
+        });
+        
+        drop(active_workers);
+        drop(not_found_count);
+        
+        all_received_no_job
+    }
+
+    async fn move_all_jobs_to_reschedule(&self) {
+        // Move all jobs on submitted jobs to reschedule
+        // Only moves jobs that are not already successful or failed
+        let jobs = self.submitted_jobs.get_jobs().await;
+        let mut reschedule = self.submitted_jobs.reschedule_job_ids.lock().await;
+        let successfull = self.submitted_jobs.successfull_job_ids.lock().await;
+        let failed = self.submitted_jobs.failed_job_ids.lock().await;
+        let mut pending = self.submitted_jobs.pending_job_ids.lock().await;
+
+        let mut moved_count = 0;
+        for job in &jobs {
+            let job_id = &job.id;
+            // Only move jobs that are not already successful or failed
+            if !successfull.contains(job_id) && !failed.contains(job_id) {
+                // Remove from pending if present
+                pending.remove(job_id);
+                // Add to reschedule if not already there
+                if reschedule.insert(job_id.clone()) {
+                    moved_count += 1;
+                }
+            }
+        }
+
+        drop(reschedule);
+        drop(successfull);
+        drop(failed);
+        drop(pending);
+
+        if moved_count > 0 {
+            println!("Scheduler: Moved {} job(s) to reschedule_job_ids (all workers received no job)", moved_count);
+        }
+    }
+
     async fn activate_sequential_mode(&self) {
         // Terminate all workers except worker 0
         let workers_to_terminate: Vec<usize> = (1..self.workers.len()).map(|i| self.workers[i].worker_id).collect();
@@ -655,8 +709,14 @@ impl SchedulerEngine {
             let all_in_reschedule = self.submitted_jobs.are_all_jobs_in_reschedule().await;
             let sequential_run_flag = *self.sequential_run_flag.lock().await;
         
-    
-            if all_in_reschedule && sequential_run_flag==false {
+            // Check if all workers received no job
+            let all_workers_received_no_job = self.check_job_not_found_status(1).await;
+            if all_workers_received_no_job {
+                self.move_all_jobs_to_reschedule().await;
+            }
+            
+            // Activate sequential mode if all jobs are in reschedule OR all workers received no job
+            if (all_in_reschedule && sequential_run_flag == false) || all_workers_received_no_job {
                 self.activate_sequential_mode().await;
             }
             

@@ -184,7 +184,12 @@ impl SubmittedJobs {
                 if !sequential_run_flag && reschedule_job_ids.contains(task_id) {
                     continue;
                 }
-                let job_memory = memory_pred.unwrap_or(0.0) as usize;
+                // if sequential_run_flag is true set job_memory to 0
+                let job_memory = if sequential_run_flag {
+                    0
+                } else {
+                    memory_pred.unwrap_or(0.0) as usize
+                };
                 if io_bound_task_ids.contains(task_id) && job_memory<=memory_capacity{
                     println!("job memore: {:?}, <=  memory_capacity: {:?}", job_memory, memory_capacity);
                     let job = jobs[i].clone();
@@ -226,7 +231,12 @@ impl SubmittedJobs {
                 if !sequential_run_flag && reschedule_job_ids.contains(task_id) {
                     continue;
                 }
-                let job_memory = memory_pred.unwrap_or(0.0) as usize;
+                // if sequential_run_flag is true set job_memory to 0
+                let job_memory = if sequential_run_flag {
+                    0
+                } else {
+                    memory_pred.unwrap_or(0.0) as usize
+                };
                 if cpu_bound_task_ids.contains(task_id) && job_memory<=memory_capacity {
                     println!("job memore: {:?}, <=  memory_capacity: {:?}", job_memory, memory_capacity);
                     let job = jobs[i].clone();
@@ -263,7 +273,13 @@ impl SubmittedJobs {
             if !sequential_run_flag && reschedule_job_ids.contains(job_id) {
                 continue;
             }
-            let job_memory = jobs[i].memory_prediction.unwrap_or(0.0) as usize;
+
+            // if sequential_run_flag is true set job_memory to 0
+            let job_memory = if sequential_run_flag {
+                0
+            } else {
+                jobs[i].memory_prediction.unwrap_or(0.0) as usize
+            };
             if job_memory<=memory_capacity {
                 println!("job memore: {:?}, <=  memory_capacity: {:?}", job_memory, memory_capacity);
                 let job = jobs[i].clone();
