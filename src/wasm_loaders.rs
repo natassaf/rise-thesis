@@ -341,4 +341,14 @@ impl WasmComponentLoader {
         // This will drop the old store and all its instances, freeing memory
         self.store = new_store;
     }
+
+    /// Aggressively clear all memory by clearing the store multiple times
+    /// This is more thorough than a single clear_store call and should be used when going idle
+    pub fn aggressive_clear(&mut self, folder_to_mount: &str) {
+        // Clear the store multiple times to ensure all memory is freed
+        // Each clear creates a new store, dropping the old one
+        for _ in 0..3 {
+            self.clear_store(folder_to_mount);
+        }
+    }
 }

@@ -24,6 +24,47 @@ impl EvaluationMetrics {
         }
     }
 
+    pub async fn all_tasks_completed_callback(&self ){
+        let completed_count = self.get_completed_count().await;
+        let total_tasks = self.get_total_tasks().await;
+        let completion_time = std::time::Instant::now();
+        let peak_memory = self.get_peak_memory().await;
+        let throughput = self
+            .calculate_throughput(completion_time, total_tasks)
+            .await;
+        let average_response_time_millis =
+            self.calculate_average_response_time().await;
+        let total_time_duration =
+            if let Some(start) = self.get_execution_start_time() {
+                completion_time.duration_since(start)
+            } else {
+                std::time::Duration::from_secs(0)
+            };
+
+        println!("=== Execution completed ===");
+        println!("Total tasks processed: {}", completed_count);
+        println!(
+            "Total execution time: {:.2} seconds ({:.2} ms)",
+            total_time_duration.as_secs(),
+            total_time_duration.as_millis()
+        );
+        println!(
+            "Average response time per task: {:.2} ms",
+            average_response_time_millis
+        );
+        println!("Throughput: {:.2} tasks/second", throughput);
+
+        // Store metrics to file
+        crate::evaluation_metrics::store_evaluation_metrics(
+            completed_count,
+            total_time_duration.as_secs_f64(),
+            total_time_duration.as_millis() as f64,
+            average_response_time_millis,
+            throughput,
+            peak_memory
+        );
+    }
+
     pub async fn initialize(&self, task_ids: Vec<String>){
         let num_tasks = task_ids.len();
         let start_time = std::time::Instant::now();

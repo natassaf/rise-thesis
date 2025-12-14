@@ -562,7 +562,7 @@ impl SchedulerEngine {
                 if let Err(e) = self.send_termination_message(workers_to_terminate.clone()).await {
                     eprintln!("Scheduler: Error sending termination message: {:?}", e);
                 }
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                tokio::time::sleep(Duration::from_secs(3)).await;
                 let mut w = self.active_workers.lock().await;
                 // Remove terminated workers by value, not by index
                 for worker_id in &workers_to_terminate {
@@ -597,9 +597,19 @@ impl SchedulerEngine {
                 let total_tasks = self.evaluation_metrics.get_total_tasks().await;
                 println!("Scheduler: Termination check - completed: {}, total: {}, match: {}", 
                         completed_count, total_tasks, completed_count == total_tasks);
+                
+                // Print evaluation metrics before resetting
+                self.evaluation_metrics.all_tasks_completed_callback().await;
+                
+                // Print job status summary
+                self.submitted_jobs.print_status().await;
+                
                 println!("Scheduler: All tasks completed! Sending termination messages to all workers...");
                 self.broadcast_termination_message().await.unwrap();
-                self.evaluation_metrics.reset().await;
+                
+                // Don't reset metrics here - they may be needed for final reporting
+                // Metrics will be reset when a new batch starts
+                break; // Exit the loop to prevent re-checking termination with reset metrics
             }
         }
     }

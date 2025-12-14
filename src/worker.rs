@@ -227,49 +227,6 @@ impl Worker {
         Ok((task_id, result))
     }
 
-    /// Called when all tasks are completed
-    /// Calculates and saves evaluation metrics
-    async fn all_tasks_completed_callback(&self ){
-        let completed_count = self.evaluation_metrics.get_completed_count().await;
-        let total_tasks = self.evaluation_metrics.get_total_tasks().await;
-        let completion_time = std::time::Instant::now();
-        let peak_memory = self.evaluation_metrics.get_peak_memory().await;
-        let throughput = self.evaluation_metrics
-            .calculate_throughput(completion_time, total_tasks)
-            .await;
-        let average_response_time_millis =
-            self.evaluation_metrics.calculate_average_response_time().await;
-        let total_time_duration =
-            if let Some(start) = self.evaluation_metrics.get_execution_start_time() {
-                completion_time.duration_since(start)
-            } else {
-                std::time::Duration::from_secs(0)
-            };
-
-        println!("=== Execution completed ===");
-        println!("Total tasks processed: {}", completed_count);
-        println!(
-            "Total execution time: {:.2} seconds ({:.2} ms)",
-            total_time_duration.as_secs(),
-            total_time_duration.as_millis()
-        );
-        println!(
-            "Average response time per task: {:.2} ms",
-            average_response_time_millis
-        );
-        println!("Throughput: {:.2} tasks/second", throughput);
-
-        // Store metrics to file
-        crate::evaluation_metrics::store_evaluation_metrics(
-            completed_count,
-            total_time_duration.as_secs_f64(),
-            total_time_duration.as_millis() as f64,
-            average_response_time_millis,
-            throughput,
-            peak_memory
-        );
-    }
-
     async fn run_task(&self, task: Job)->Status {
         let task_id = task.id.clone();
 
@@ -364,7 +321,7 @@ impl Worker {
 
         // Check if all tasks are completed
         if self.evaluation_metrics.are_all_tasks_completed().await {
-            self.all_tasks_completed_callback().await;
+            self.evaluation_metrics.all_tasks_completed_callback().await;
         }
 
         Status::Success
@@ -608,12 +565,20 @@ impl Worker {
                 // Process any remaining tasks first
                 self.process_task(&mut tasks_to_process).await;
 
-                // Clear WASM store to free all memory before going idle
+                // Aggressively clear WASM store and linker to free all memory
                 {
                     let mut loader = self.wasm_loader.lock().await;
-                    loader.clear_store("models");
-                    println!("Worker {}: Cleared WASM store, all memory freed", self.worker_id);
+                    // Use aggressive clear which recreates both store and linker
+                    loader.aggressive_clear("models");
+                    println!("Worker {}: Aggressively cleared WASM store and linker, all memory freed", self.worker_id);
                 }
+                
+                // Drop the tasks vector to free memory
+                tasks_to_process.clear();
+                tasks_to_process.shrink_to_fit();
+                
+                // Small delay to allow OS to reclaim memory
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
                 // Now go idle and wait for notification
                 println!("Worker {}: Idle, waiting for notification to resume", self.worker_id);
