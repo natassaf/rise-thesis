@@ -26,7 +26,7 @@ impl EvaluationMetrics {
         }
     }
 
-    pub async fn all_tasks_completed_callback(&self ){
+    pub async fn all_tasks_completed_callback(&self, jobs_failed: usize, jobs_succeeded: usize ){
         let completed_count = self.get_completed_count().await;
         let total_tasks = self.get_total_tasks().await;
         let completion_time = std::time::Instant::now();
@@ -57,6 +57,8 @@ impl EvaluationMetrics {
         );
         println!("Throughput: {:.2} tasks/second", throughput);
         println!("Successful runs in sequential mode: {}", sequential_successful);
+        println!("Number of jobs failed: {}", jobs_failed);
+        println!("Number of jobs succeeded: {}", jobs_succeeded);
 
         // Store metrics to file
         crate::evaluation_metrics::store_evaluation_metrics(
@@ -66,7 +68,9 @@ impl EvaluationMetrics {
             average_response_time_millis,
             throughput,
             peak_memory,
-            sequential_successful
+            sequential_successful,
+            jobs_failed,
+            jobs_succeeded
         );
     }
 
@@ -207,11 +211,13 @@ pub fn store_evaluation_metrics(
     avg_time_ms: f64,
     throughput: f64,
     max_memory_kb: u64,
-    sequential_successful: usize
+    sequential_successful: usize,
+    jobs_failed: usize,
+    jobs_succeeded: usize
 ) {
     let metrics_content = format!(
-        "Max memory: {} \nTotal tasks processed: {}\nTotal execution time: {:.2} seconds ({:.2} ms)\nAverage time per task: {:.2} ms\nThroughput: {:.2} tasks/second\nSuccessful runs in sequential mode: {}\n",
-        max_memory_kb, total_tasks, total_time_secs, total_time_ms, avg_time_ms, throughput, sequential_successful
+        "Max memory: {} \nTotal tasks processed: {}\nTotal execution time: {:.2} seconds ({:.2} ms)\nAverage time per task: {:.2} ms\nThroughput: {:.2} tasks/second\nSuccessful runs in sequential mode: {}\nNumber of jobs failed: {}\nNumber of jobs succeeded: {}\n",
+        max_memory_kb, total_tasks, total_time_secs, total_time_ms, avg_time_ms, throughput, sequential_successful, jobs_failed, jobs_succeeded
     );
 
     if let Err(e) = std::fs::write("results/evaluation_metrics.txt", metrics_content) {

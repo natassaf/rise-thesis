@@ -334,8 +334,48 @@ impl SchedulerEngine {
         drop(self.scheduler_txs.clone());
         Ok(())
     }
-    
+
+    pub async fn check_no_job_found_termination(&self) -> bool {
+        // if active workers have received no job found more than 3 times and sequential run flag is true return true
+        let sequential_run_flag = *self.sequential_run_flag.lock().await;
+        // Only check if sequential mode is active
+        if !sequential_run_flag {
+            return false;
+        }
+        
+        // Check if active workers have consecutive_not_found_count > 3
+        let active_workers = self.active_workers.lock().await;
+        let not_found_count = self.consecutive_not_found_count.lock().await;
+        
+        if active_workers.is_empty() {
+            drop(active_workers);
+            drop(not_found_count);
+            return false;
+        }
+        
+        // Check if all active workers have received no job found more than 3 times
+        let all_received_no_job_more_than_3 = active_workers.iter().all(|&worker_id| {
+            not_found_count.get(&worker_id).copied().unwrap_or(0) > 3
+        });
+        
+        drop(active_workers);
+        drop(not_found_count);
+        
+        if all_received_no_job_more_than_3 {
+            println!("Scheduler: All active workers have received no job found more than 3 times in sequential mode - termination condition met");
+        }
+        
+        all_received_no_job_more_than_3
+    }
+
     pub async fn check_for_termination(&self)->bool{
+        // First check if we should terminate due to no job found in sequential mode
+        // This takes priority because if all active workers can't find jobs, we should terminate
+        // even if there are jobs in the queue (they might be stuck/unprocessable)
+        if self.check_no_job_found_termination().await {
+            return true;
+        }
+        
         // Check SubmittedJobs termination condition
         // This handles both cases:
         // 1. Jobs list is empty and all jobs completed (removed from list)
@@ -343,7 +383,7 @@ impl SchedulerEngine {
         if !self.submitted_jobs.check_for_termination().await {
             return false;
         }
-        
+
         // Also verify evaluation metrics indicate completion
         // Evaluation metrics are reset when a new batch starts, so they're always fresh
         let all_completed = self.evaluation_metrics.are_all_tasks_completed().await;
@@ -446,7 +486,7 @@ impl SchedulerEngine {
                     drop(not_found_count);
                     
                     if count >= 5 {
-                        println!("Scheduler: Worker {} has consecutive NotFound count {} > 10, waiting 3 seconds", from_worker_message.worker_id, count);
+                        println!("Scheduler: Worker {} has consecutive NotFound count {} >= 5, waiting 3 seconds", from_worker_message.worker_id, count);
                         tokio::time::sleep(Duration::from_secs(3)).await;
                     }
                 }
@@ -547,6 +587,18 @@ impl SchedulerEngine {
         if reschedule.remove(job_id) {
             println!("Scheduler: Removed job {} from reschedule_job_ids (job succeeded)", job_id);
         }
+    }
+
+    async fn reset_not_found_counters_for_active_workers(&self) {
+        // Reset consecutive NotFound counters for all active workers
+        let active_workers = self.active_workers.lock().await;
+        let mut not_found_count = self.consecutive_not_found_count.lock().await;
+        for &worker_id in active_workers.iter() {
+            not_found_count.insert(worker_id, 0);
+        }
+        drop(active_workers);
+        drop(not_found_count);
+        println!("Scheduler: Reset consecutive NotFound counters for all active workers");
     }
 
     pub async fn reset_for_new_batch(&self) {
@@ -706,6 +758,7 @@ impl SchedulerEngine {
             memory_freed,
             if memory_before > 0 { (memory_freed as f64 / memory_before as f64) * 100.0 } else { 0.0 });
 
+
         // Remove terminated workers from active_workers
         let mut w = self.active_workers.lock().await;
         // Remove terminated workers by value, not by index
@@ -718,6 +771,9 @@ impl SchedulerEngine {
             println!("Scheduler: Added worker 0 to active_workers for sequential mode");
         }
         drop(w);
+
+        // reset job not found counters for all active workers
+        self.reset_not_found_counters_for_active_workers().await;
 
         // Set worker 0's num_concurrent_tasks to 1 for sequential execution
         if let Some(worker_0) = self.workers.get(0) {
@@ -756,9 +812,9 @@ impl SchedulerEngine {
         
             // Check if all workers received no job
             let all_workers_received_no_job = self.check_job_not_found_status(1).await;
-            if all_workers_received_no_job {
-                self.move_all_jobs_to_reschedule().await;
-            }
+            // if all_workers_received_no_job {
+            //     self.move_all_jobs_to_reschedule().await;
+            // }
             
             // Activate sequential mode if all jobs are in reschedule OR all workers received no job
             // Only activate if not already in sequential mode
@@ -779,8 +835,12 @@ impl SchedulerEngine {
                 // Print termination report
                 self.submitted_jobs.termination_report().await;
                 
+                // Get failed and successful job counts
+                let jobs_failed = self.submitted_jobs.get_failed_count().await;
+                let jobs_succeeded = self.submitted_jobs.get_successful_count().await;
+                
                 // Print evaluation metrics before resetting
-                self.evaluation_metrics.all_tasks_completed_callback().await;
+                self.evaluation_metrics.all_tasks_completed_callback(jobs_failed, jobs_succeeded).await;
                 
                 // Print job status summary
                 self.submitted_jobs.print_status().await;
