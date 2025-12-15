@@ -11,6 +11,7 @@ use flate2::write::GzEncoder;
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, Notify, mpsc};
 use wasmtime::component::Val;
 
@@ -240,6 +241,7 @@ impl Worker {
                     "Worker {}: Insufficient memory for task {}. Required: {} KB, Available: {} KB",
                     self.worker_id, task_id, required_mem, current_memory
                 );
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 // Send failure status and return early
                 self.send_task_status(task_id.clone(), Status::Failed).await;
                 return Status::Failed;
@@ -566,7 +568,7 @@ impl Worker {
                 {
                     let mut loader = self.wasm_loader.lock().await;
                     // Use aggressive clear which recreates both store and linker
-                    loader.aggressive_clear("models");
+                    loader.clear_memory("models");
                     println!("Worker {}: Aggressively cleared WASM store and linker, all memory freed", self.worker_id);
                 }
                 

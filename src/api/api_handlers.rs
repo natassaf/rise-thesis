@@ -2,6 +2,7 @@ use crate::api::api_objects::{ExecuteTasksRequest, Job, SubmittedJobs, TaskQuery
 use crate::evaluation_metrics::{EvaluationMetrics};
 use crate::jobs_order_optimizer::{JobsOrderOptimizer};
 use crate::optimized_scheduling_preprocessing::features_extractor::TaskBoundType;
+use crate::memory_monitoring::{get_peak_memory_kb, get_peak_memory_from_cgroup_kb};
 use actix_web::{HttpResponse, Responder, web};
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -91,6 +92,11 @@ pub async fn handle_submit_task(
         "Number of tasks waiting: {:?}",
         submitted_tasks.get_num_tasks().await
     );
+    // Get peak memory: prefer cgroup (more accurate), fallback to process RSS
+    let peak_memory = get_peak_memory_from_cgroup_kb()
+        .or_else(|| get_peak_memory_kb())
+        .unwrap_or(0);
+    println!("max memory: {} KB", peak_memory);
     HttpResponse::Ok().body("Task submitted")
 }
 

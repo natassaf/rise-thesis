@@ -1,7 +1,557 @@
 {
+  "test_case_image_classification_resnet20": {
+    "memory_prediction": 91946.046875,
+    "time_prediction": 3.665560722351074,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matrix_transpose11": {
+    "memory_prediction": 27345.234375,
+    "time_prediction": -0.608385443687439,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet10": {
+    "memory_prediction": 95193.171875,
+    "time_prediction": 1.9547441005706787,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_squeezenet3": {
+    "memory_prediction": 95193.171875,
+    "time_prediction": 1.9547441005706787,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matmul1": {
+    "memory_prediction": 37478.74609375,
+    "time_prediction": -0.49306046962738037,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul2": {
+    "memory_prediction": 43426.59765625,
+    "time_prediction": -0.2915743589401245,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose19": {
+    "memory_prediction": 26721.3203125,
+    "time_prediction": -0.6183260679244995,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose3": {
+    "memory_prediction": 26791.96484375,
+    "time_prediction": -0.617200493812561,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib18": {
+    "memory_prediction": 24639.05078125,
+    "time_prediction": 5.580076217651367,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet15": {
+    "memory_prediction": 91589.109375,
+    "time_prediction": 3.649473190307617,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matrix_transpose13": {
+    "memory_prediction": 26463.3203125,
+    "time_prediction": -0.6224364042282104,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose2": {
+    "memory_prediction": 26585.21484375,
+    "time_prediction": -0.6204944849014282,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose17": {
+    "memory_prediction": 26374.95703125,
+    "time_prediction": -0.6238442659378052,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib9": {
+    "memory_prediction": 24639.21484375,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet11": {
+    "memory_prediction": 90138.640625,
+    "time_prediction": 3.584097385406494,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib_opt10": {
+    "memory_prediction": 25305.859375,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet18": {
+    "memory_prediction": 91589.109375,
+    "time_prediction": 3.649473190307617,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_squeezenet6": {
+    "memory_prediction": 90701.3203125,
+    "time_prediction": 1.8258545398712158,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_squeezenet21": {
+    "memory_prediction": 83560.296875,
+    "time_prediction": 1.5874489545822144,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib14": {
+    "memory_prediction": 24639.06640625,
+    "time_prediction": 5.580076217651367,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet11": {
+    "memory_prediction": 78678.8671875,
+    "time_prediction": 1.325430154800415,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib_opt20": {
+    "memory_prediction": 25305.94140625,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul24": {
+    "memory_prediction": 41047.2734375,
+    "time_prediction": -0.3752647638320923,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet23": {
+    "memory_prediction": 95193.171875,
+    "time_prediction": 1.9547441005706787,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matrix_transpose15": {
+    "memory_prediction": 26599.515625,
+    "time_prediction": -0.6202665567398071,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet21": {
+    "memory_prediction": 97490.0546875,
+    "time_prediction": 3.9114904403686523,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_squeezenet16": {
+    "memory_prediction": 78678.8671875,
+    "time_prediction": 1.325430154800415,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matrix_transpose12": {
+    "memory_prediction": 26686.80078125,
+    "time_prediction": -0.6188760995864868,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt7": {
+    "memory_prediction": 25305.99609375,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul12": {
+    "memory_prediction": 36673.12109375,
+    "time_prediction": -0.5158079862594604,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib24": {
+    "memory_prediction": 24639.16015625,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet19": {
+    "memory_prediction": 97490.0546875,
+    "time_prediction": 3.9114904403686523,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib17": {
+    "memory_prediction": 24639.14453125,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet12": {
+    "memory_prediction": 78678.8671875,
+    "time_prediction": 1.325430154800415,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matmul15": {
+    "memory_prediction": 42261.6796875,
+    "time_prediction": -0.3332105875015259,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose6": {
+    "memory_prediction": 26524.94140625,
+    "time_prediction": -0.6214548349380493,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet9": {
+    "memory_prediction": 77875.1171875,
+    "time_prediction": 1.260053038597107,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matmul4": {
+    "memory_prediction": 31777.1484375,
+    "time_prediction": -0.6127713918685913,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet22": {
+    "memory_prediction": 98955.015625,
+    "time_prediction": 2.0622472763061523,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matmul16": {
+    "memory_prediction": 61936.0703125,
+    "time_prediction": 0.35153043270111084,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet17": {
+    "memory_prediction": 78876.65625,
+    "time_prediction": 1.3415164947509766,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib0": {
+    "memory_prediction": 24639.1015625,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose8": {
+    "memory_prediction": 26455.4765625,
+    "time_prediction": -0.6225618124008179,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt3": {
+    "memory_prediction": 25306.01953125,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose10": {
+    "memory_prediction": 26408.40625,
+    "time_prediction": -0.6233116388320923,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet13": {
+    "memory_prediction": 103715.2890625,
+    "time_prediction": 4.149897575378418,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_squeezenet19": {
+    "memory_prediction": 78876.65625,
+    "time_prediction": 1.3415164947509766,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib6": {
+    "memory_prediction": 24639.203125,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib22": {
+    "memory_prediction": 24639.18359375,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt22": {
+    "memory_prediction": 25305.75390625,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt15": {
+    "memory_prediction": 25306.00390625,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib7": {
+    "memory_prediction": 24639.33203125,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib8": {
+    "memory_prediction": 24639.18359375,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose16": {
+    "memory_prediction": 26662.87890625,
+    "time_prediction": -0.6192570924758911,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt8": {
+    "memory_prediction": 25305.76171875,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
   "test_case_fib_opt16": {
     "memory_prediction": 25305.828125,
     "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet3": {
+    "memory_prediction": 103715.2890625,
+    "time_prediction": 4.149897575378418,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_resnet16": {
+    "memory_prediction": 103715.2890625,
+    "time_prediction": 4.149897575378418,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_resnet8": {
+    "memory_prediction": 108016.78125,
+    "time_prediction": 4.278787136077881,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matmul17": {
+    "memory_prediction": 32315.37109375,
+    "time_prediction": -0.6041959524154663,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet14": {
+    "memory_prediction": 98955.015625,
+    "time_prediction": 2.0622472763061523,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_squeezenet13": {
+    "memory_prediction": 83560.296875,
+    "time_prediction": 1.5874489545822144,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_resnet10": {
+    "memory_prediction": 103715.2890625,
+    "time_prediction": 4.149897575378418,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib_opt23": {
+    "memory_prediction": 25305.69140625,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib10": {
+    "memory_prediction": 24639.24609375,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul5": {
+    "memory_prediction": 31616.05078125,
+    "time_prediction": -0.6153379678726196,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib13": {
+    "memory_prediction": 24639.078125,
+    "time_prediction": 5.580076217651367,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul7": {
+    "memory_prediction": 56941.875,
+    "time_prediction": 0.19757318496704102,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul14": {
+    "memory_prediction": 33916.640625,
+    "time_prediction": -0.5774301290512085,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet4": {
+    "memory_prediction": 78876.65625,
+    "time_prediction": 1.3415164947509766,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib_opt13": {
+    "memory_prediction": 25305.61328125,
+    "time_prediction": 0.506316065788269,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose21": {
+    "memory_prediction": 26653.1875,
+    "time_prediction": -0.6194115877151489,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet5": {
+    "memory_prediction": 97490.0546875,
+    "time_prediction": 3.9114904403686523,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matrix_transpose23": {
+    "memory_prediction": 26734.86328125,
+    "time_prediction": -0.6181102991104126,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib12": {
+    "memory_prediction": 24639.24609375,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul6": {
+    "memory_prediction": 28497.55078125,
+    "time_prediction": -0.6650232076644897,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib4": {
+    "memory_prediction": 24639.109375,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib15": {
+    "memory_prediction": 24639.3359375,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib1": {
+    "memory_prediction": 24639.21875,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul10": {
+    "memory_prediction": 39640.578125,
+    "time_prediction": -0.4239417314529419,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt19": {
+    "memory_prediction": 25305.953125,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet14": {
+    "memory_prediction": 103715.2890625,
+    "time_prediction": 4.149897575378418,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib16": {
+    "memory_prediction": 24639.21875,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul8": {
+    "memory_prediction": 32738.390625,
+    "time_prediction": -0.5974563360214233,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet6": {
+    "memory_prediction": 108016.78125,
+    "time_prediction": 4.278787136077881,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib2": {
+    "memory_prediction": 24639.21875,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose4": {
+    "memory_prediction": 26751.91796875,
+    "time_prediction": -0.6178385019302368,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt17": {
+    "memory_prediction": 25305.70703125,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt21": {
+    "memory_prediction": 25305.67578125,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose24": {
+    "memory_prediction": 26754.59375,
+    "time_prediction": -0.6177958250045776,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib3": {
+    "memory_prediction": 24639.3515625,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt11": {
+    "memory_prediction": 25305.61328125,
+    "time_prediction": 0.506316065788269,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul23": {
+    "memory_prediction": 29070.05078125,
+    "time_prediction": -0.6559017896652222,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose1": {
+    "memory_prediction": 27044.9375,
+    "time_prediction": -0.6131700277328491,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet1": {
+    "memory_prediction": 83560.296875,
+    "time_prediction": 1.5874489545822144,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matrix_transpose18": {
+    "memory_prediction": 26848.73046875,
+    "time_prediction": -0.6162961721420288,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet23": {
+    "memory_prediction": 91589.109375,
+    "time_prediction": 3.649473190307617,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_resnet22": {
+    "memory_prediction": 97490.0546875,
+    "time_prediction": 3.9114904403686523,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matmul20": {
+    "memory_prediction": 32071.42578125,
+    "time_prediction": -0.6080828905105591,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet7": {
+    "memory_prediction": 77875.1171875,
+    "time_prediction": 1.260053038597107,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matmul13": {
+    "memory_prediction": 47204.671875,
+    "time_prediction": -0.1298760175704956,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet0": {
+    "memory_prediction": 90138.640625,
+    "time_prediction": 3.584097385406494,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_resnet17": {
+    "memory_prediction": 103715.2890625,
+    "time_prediction": 4.149897575378418,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_resnet24": {
+    "memory_prediction": 91946.046875,
+    "time_prediction": 3.665560722351074,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_resnet1": {
+    "memory_prediction": 91946.046875,
+    "time_prediction": 3.665560722351074,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib5": {
+    "memory_prediction": 24639.32421875,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul21": {
+    "memory_prediction": 50873.98828125,
+    "time_prediction": 0.010762810707092285,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul3": {
+    "memory_prediction": 40563.15625,
+    "time_prediction": -0.3920172452926636,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul0": {
+    "memory_prediction": 40071.7578125,
+    "time_prediction": -0.4090210199356079,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet12": {
+    "memory_prediction": 111610.9609375,
+    "time_prediction": 4.38629150390625,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib19": {
+    "memory_prediction": 24639.30859375,
+    "time_prediction": 5.580076694488525,
     "task_bound_type": "CpuBound"
   },
   "test_case_fib_opt14": {
@@ -9,9 +559,169 @@
     "time_prediction": 0.506316065788269,
     "task_bound_type": "CpuBound"
   },
+  "test_case_matmul9": {
+    "memory_prediction": 42102.1484375,
+    "time_prediction": -0.3387622833251953,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib23": {
+    "memory_prediction": 24639.12890625,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet2": {
+    "memory_prediction": 95193.171875,
+    "time_prediction": 1.9547441005706787,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib_opt12": {
+    "memory_prediction": 25305.87890625,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt1": {
+    "memory_prediction": 25305.828125,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib20": {
+    "memory_prediction": 24639.30078125,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul18": {
+    "memory_prediction": 47870.5546875,
+    "time_prediction": -0.09613442420959473,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose14": {
+    "memory_prediction": 26784.85546875,
+    "time_prediction": -0.6173135042190552,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul19": {
+    "memory_prediction": 27527.109375,
+    "time_prediction": -0.6804848909378052,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib11": {
+    "memory_prediction": 24639.078125,
+    "time_prediction": 5.580076217651367,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet7": {
+    "memory_prediction": 91946.046875,
+    "time_prediction": 3.665560722351074,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matrix_transpose22": {
+    "memory_prediction": 26970.37109375,
+    "time_prediction": -0.6143580675125122,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib21": {
+    "memory_prediction": 24639.125,
+    "time_prediction": 5.580076694488525,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet15": {
+    "memory_prediction": 98955.015625,
+    "time_prediction": 2.0622472763061523,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_resnet9": {
+    "memory_prediction": 111610.9609375,
+    "time_prediction": 4.38629150390625,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matmul22": {
+    "memory_prediction": 29658.359375,
+    "time_prediction": -0.6465288400650024,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt0": {
+    "memory_prediction": 25305.63671875,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet24": {
+    "memory_prediction": 77875.1171875,
+    "time_prediction": 1.260053038597107,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib_opt2": {
+    "memory_prediction": 25305.828125,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt6": {
+    "memory_prediction": 25305.7890625,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matmul11": {
+    "memory_prediction": 29217.94140625,
+    "time_prediction": -0.6535454988479614,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_fib_opt9": {
+    "memory_prediction": 25305.8125,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose7": {
+    "memory_prediction": 26458.73046875,
+    "time_prediction": -0.6225098371505737,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet0": {
+    "memory_prediction": 78876.65625,
+    "time_prediction": 1.3415164947509766,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_squeezenet20": {
+    "memory_prediction": 78678.8671875,
+    "time_prediction": 1.325430154800415,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matrix_transpose20": {
+    "memory_prediction": 26984.66015625,
+    "time_prediction": -0.6141301393508911,
+    "task_bound_type": "CpuBound"
+  },
   "test_case_fib_opt18": {
     "memory_prediction": 25305.57421875,
     "time_prediction": 0.506316065788269,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_squeezenet5": {
+    "memory_prediction": 83560.296875,
+    "time_prediction": 1.5874489545822144,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_fib_opt24": {
+    "memory_prediction": 25305.73828125,
+    "time_prediction": 0.5063164234161377,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet2": {
+    "memory_prediction": 97490.0546875,
+    "time_prediction": 3.9114904403686523,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_matrix_transpose5": {
+    "memory_prediction": 26684.7890625,
+    "time_prediction": -0.6189080476760864,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose0": {
+    "memory_prediction": 26446.1015625,
+    "time_prediction": -0.6227108240127563,
+    "task_bound_type": "CpuBound"
+  },
+  "test_case_matrix_transpose9": {
+    "memory_prediction": 26532.21484375,
+    "time_prediction": -0.621338963508606,
     "task_bound_type": "CpuBound"
   },
   "test_case_fib_opt5": {
@@ -19,9 +729,24 @@
     "time_prediction": 0.5063164234161377,
     "task_bound_type": "CpuBound"
   },
-  "test_case_fib_opt3": {
-    "memory_prediction": 25306.01953125,
+  "test_case_fib_opt4": {
+    "memory_prediction": 25305.65625,
     "time_prediction": 0.5063164234161377,
     "task_bound_type": "CpuBound"
+  },
+  "test_case_image_classification_resnet4": {
+    "memory_prediction": 111610.9609375,
+    "time_prediction": 4.38629150390625,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_squeezenet8": {
+    "memory_prediction": 78876.65625,
+    "time_prediction": 1.3415164947509766,
+    "task_bound_type": "IoBound"
+  },
+  "test_case_image_classification_squeezenet18": {
+    "memory_prediction": 98955.015625,
+    "time_prediction": 2.0622472763061523,
+    "task_bound_type": "IoBound"
   }
 }

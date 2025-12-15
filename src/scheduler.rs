@@ -1,4 +1,3 @@
-use std::ops::Add;
 use std::sync::Arc;
 use std::collections::{HashSet, HashMap};
 use std::time::Duration;
@@ -25,6 +24,7 @@ pub struct SchedulerEngine {
     scheduler_channel_rx: Arc<Mutex<mpsc::Receiver<(MessageType, Message)>>>, // Channel for workers messages to send to scheduler. Worker channels are cloned
     scheduler_txs: Arc<Mutex<Vec<mpsc::Sender<(MessageType, Message)>>>>, // Senders to send messages to workers
     evaluation_metrics: Arc<EvaluationMetrics>, // Evaluation metrics storage
+    component_cache: Arc<crate::wasm_loaders::ComponentCache>, // Shared component cache
     pin_cores: bool,
     worker_requests: Arc<Mutex<HashSet<usize>>>, // Track which workers have sent job requests
     sequential_run_flag: Arc<Mutex<bool>>, // when true run all remaining jobs on one worker
@@ -80,6 +80,7 @@ impl SchedulerEngine {
             scheduler_channel_rx,
             scheduler_txs: Arc::new(Mutex::new(scheduler_txs)),
             evaluation_metrics,
+            component_cache: component_cache.clone(),
             pin_cores,
             worker_requests: Arc::new(Mutex::new(HashSet::new())),
             sequential_run_flag: Arc::new(Mutex::new(false)) ,
@@ -438,6 +439,18 @@ impl SchedulerEngine {
                     println!("Scheduler: Added job {} to pending_job_ids (sending to worker {})", job_id, from_worker_message.worker_id);
                 }
                 
+                // check if this workers count no job is >10 and if it is don't send any message
+                if job_to_send.is_none() {
+                    let not_found_count = self.consecutive_not_found_count.lock().await;
+                    let count = not_found_count.get(&from_worker_message.worker_id).copied().unwrap_or(0);
+                    drop(not_found_count);
+                    
+                    if count >= 5 {
+                        println!("Scheduler: Worker {} has consecutive NotFound count {} > 10, waiting 3 seconds", from_worker_message.worker_id, count);
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                    }
+                }
+                
                 let response_message = self.encode_response(job_to_send, &from_worker_message).await;
                 self.send_message(&[from_worker_message.worker_id], &response_message).await?;
             }
@@ -450,6 +463,11 @@ impl SchedulerEngine {
                         // Note: Worker also sets this, but we set it here for consistency with failed jobs
                         // Using status=1 to indicate success
                         self.evaluation_metrics.set_task_status(task_status_message.job_id.clone(), 1).await;
+                        
+                        // If sequential mode is active, increment the sequential successful count
+                        if sequential_run_flag {
+                            self.evaluation_metrics.increment_sequential_successful().await;
+                        }
                         
                         // Remove from pending_job_ids and add to successfull_job_ids
                         let mut pending = self.submitted_jobs.pending_job_ids.lock().await;
@@ -653,13 +671,41 @@ impl SchedulerEngine {
     }
 
     async fn activate_sequential_mode(&self) {
+        use crate::memory_monitoring::get_available_memory_kb;
+        
+        // Check if sequential mode is already activated to prevent multiple calls
+        let sequential_flag = *self.sequential_run_flag.lock().await;
+        if sequential_flag {
+            println!("Scheduler: Sequential mode already activated, skipping");
+            return;
+        }
+        
+        // Log memory before clearing (at the start of activation)
+        let memory_before = get_available_memory_kb();
+        println!("Scheduler: Memory before clearing workers: {} KB", memory_before);
+        
         // Terminate all workers except worker 0
         let workers_to_terminate: Vec<usize> = (1..self.workers.len()).map(|i| self.workers[i].worker_id).collect();
         if let Err(e) = self.send_termination_message(workers_to_terminate.clone()).await {
             eprintln!("Scheduler: Error sending termination message: {:?}", e);
         }
-        tokio::time::sleep(Duration::from_secs(3)).await;
         
+        // Wait for workers to receive termination message and start clearing
+        println!("Scheduler: Waiting for workers to receive termination and start clearing memory...");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        
+        // Now wait longer for workers to actually clear memory and go idle
+        println!("Scheduler: Waiting for workers to clear memory...");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        
+        // Check memory after initial wait
+        let memory_after = get_available_memory_kb();   
+        let memory_freed =  memory_after - memory_before;   
+        println!("Scheduler: Memory after clearing workers: {} KB (freed: {} KB, {:.1}% of initial)", 
+            memory_after, 
+            memory_freed,
+            if memory_before > 0 { (memory_freed as f64 / memory_before as f64) * 100.0 } else { 0.0 });
+
         // Remove terminated workers from active_workers
         let mut w = self.active_workers.lock().await;
         // Remove terminated workers by value, not by index
@@ -692,7 +738,6 @@ impl SchedulerEngine {
         // Start loop to receive messages from workers
         let mut rx = self.scheduler_channel_rx.lock().await;
         let mut counter = 0;
-        let mut prepare_for_sequential_execution_flag = false;
         loop {   
             // Receive message from a worker
             println!("Iteration number: {}", counter);
@@ -716,8 +761,10 @@ impl SchedulerEngine {
             }
             
             // Activate sequential mode if all jobs are in reschedule OR all workers received no job
-            if (all_in_reschedule && sequential_run_flag == false) || all_workers_received_no_job {
+            // Only activate if not already in sequential mode
+            if !sequential_run_flag && (all_in_reschedule || all_workers_received_no_job) {
                 self.activate_sequential_mode().await;
+                
             }
             
 

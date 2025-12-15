@@ -12,6 +12,7 @@ pub struct EvaluationMetrics {
     response_time_per_task: Arc<StdMutex<HashMap<String, Duration>>>,
     task_status: Arc<Mutex<HashMap<String, u8>>>, // task_id -> 0 (not processed) or 1 (processed)
     completed_count: Arc<Mutex<usize>>,
+    sequential_successful_count: Arc<Mutex<usize>>, // Count of successful runs when sequential_run_flag is true
 }
 
 impl EvaluationMetrics {
@@ -21,6 +22,7 @@ impl EvaluationMetrics {
             response_time_per_task: Arc::new(StdMutex::new(HashMap::new())),
             task_status: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             completed_count: Arc::new(tokio::sync::Mutex::new(0)),
+            sequential_successful_count: Arc::new(tokio::sync::Mutex::new(0)),
         }
     }
 
@@ -34,6 +36,7 @@ impl EvaluationMetrics {
             .await;
         let average_response_time_millis =
             self.calculate_average_response_time().await;
+        let sequential_successful = self.get_sequential_successful_count().await;
         let total_time_duration =
             if let Some(start) = self.get_execution_start_time() {
                 completion_time.duration_since(start)
@@ -53,6 +56,7 @@ impl EvaluationMetrics {
             average_response_time_millis
         );
         println!("Throughput: {:.2} tasks/second", throughput);
+        println!("Successful runs in sequential mode: {}", sequential_successful);
 
         // Store metrics to file
         crate::evaluation_metrics::store_evaluation_metrics(
@@ -61,7 +65,8 @@ impl EvaluationMetrics {
             total_time_duration.as_millis() as f64,
             average_response_time_millis,
             throughput,
-            peak_memory
+            peak_memory,
+            sequential_successful
         );
     }
 
@@ -176,10 +181,20 @@ pub async fn set_task_status(&self, task_id: String, status: u8) {
            .unwrap_or(0)
     }
 
+    pub async fn increment_sequential_successful(&self) {
+        let mut count = self.sequential_successful_count.lock().await;
+        *count += 1;
+    }
+
+    pub async fn get_sequential_successful_count(&self) -> usize {
+        *self.sequential_successful_count.lock().await
+    }
+
     pub async fn reset(&self) {
         *self.execution_start_time.lock().unwrap() = None;
         self.task_status.lock().await.clear();
         *self.completed_count.lock().await = 0;
+        *self.sequential_successful_count.lock().await = 0;
         self.response_time_per_task.lock().unwrap().clear();
         
     }
@@ -191,11 +206,12 @@ pub fn store_evaluation_metrics(
     total_time_ms: f64,
     avg_time_ms: f64,
     throughput: f64,
-    max_memory_kb: u64
+    max_memory_kb: u64,
+    sequential_successful: usize
 ) {
     let metrics_content = format!(
-        "Max memory: {} \nTotal tasks processed: {}\nTotal execution time: {:.2} seconds ({:.2} ms)\nAverage time per task: {:.2} ms\nThroughput: {:.2} tasks/second\n",
-        max_memory_kb, total_tasks, total_time_secs, total_time_ms, avg_time_ms, throughput
+        "Max memory: {} \nTotal tasks processed: {}\nTotal execution time: {:.2} seconds ({:.2} ms)\nAverage time per task: {:.2} ms\nThroughput: {:.2} tasks/second\nSuccessful runs in sequential mode: {}\n",
+        max_memory_kb, total_tasks, total_time_secs, total_time_ms, avg_time_ms, throughput, sequential_successful
     );
 
     if let Err(e) = std::fs::write("results/evaluation_metrics.txt", metrics_content) {
