@@ -195,7 +195,7 @@ impl SchedulerAlgorithm for Improvement1{
         
         // Use scoping to ensure predictions HashMaps are dropped after use
         let (cpu_bound_task_ids, io_bound_task_ids) = {
-            let (_, job_id_to_time_prediction, job_id_to_task_bound_type) = 
+            let (job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type) = 
                 load_predictions_from_file(PREDICTIONS_FILE, &job_ids)
                     .unwrap_or_else(|e| {
                         eprintln!("[ERROR] Failed to load predictions from {}: {}", PREDICTIONS_FILE, e);
@@ -205,9 +205,12 @@ impl SchedulerAlgorithm for Improvement1{
             
             println!("Loaded predictions for {} jobs from {} (no feature extraction or model loading)", job_ids.len(), PREDICTIONS_FILE);
 
-            // Update jobs with time predictions and task bound type (no parallel iterator needed)
+            // Update jobs with memory predictions, time predictions and task bound type (no parallel iterator needed)
             let mut jobs = submitted_jobs.jobs.lock().await;
             for job in jobs.iter_mut() {
+                if let Some(prediction) = job_id_to_memory_prediction.get(&job.id) {
+                    job.memory_prediction = Some(*prediction);
+                }
                 if let Some(prediction) = job_id_to_time_prediction.get(&job.id) {
                     job.execution_time_prediction = Some(*prediction);
                 }
@@ -251,6 +254,7 @@ impl SchedulerAlgorithm for Improvement1{
             );
             
             // Explicitly drop HashMaps after sorting to free memory
+            drop(job_id_to_memory_prediction);
             drop(job_id_to_time_prediction);
             drop(job_id_to_task_bound_type);
             

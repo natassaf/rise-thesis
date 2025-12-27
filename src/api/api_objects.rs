@@ -446,6 +446,180 @@ impl SubmittedJobs {
         None
     }
 
+    /// Check if a job is eligible (not in pending, failed, or reschedule)
+    async fn is_job_eligible(&self, task_id: &str) -> bool {
+        let in_pending = {
+            let pending = self.pending_job_ids.lock().await;
+            pending.contains(task_id)
+        };
+        if in_pending {
+            return false;
+        }
+        
+        let in_failed = {
+            let failed = self.failed_job_ids.lock().await;
+            failed.contains(task_id)
+        };
+        if in_failed {
+            return false;
+        }
+        
+        let in_reschedule = {
+            let reschedule = self.reschedule_job_ids.lock().await;
+            reschedule.contains(task_id)
+        };
+        if in_reschedule {
+            return false;
+        }
+        
+        true
+    }
+
+    /// Get memory requirement from memory prediction
+    fn get_job_memory(memory_pred: &Option<f64>) -> usize {
+        memory_pred.unwrap_or(0.0) as usize
+    }
+
+    /// Get two jobs: first job (job1) and first job of different type (job2)
+    /// where job1 + job2 <= memory_capacity
+    /// Returns immediately when found, otherwise None
+    /// Note: This function is never called during sequential run mode
+    pub async fn get_two_jobs(&self, memory_capacity: usize) -> Option<(Job, Job)> {
+        println!("[get_two_jobs] Called with memory_capacity: {} KB", memory_capacity);
+        
+        // Collect job data with their types
+        let (job_data, io_bound_task_ids, cpu_bound_task_ids): (
+            Vec<(usize, String, Option<f64>)>,
+            HashSet<String>,
+            HashSet<String>
+        ) = {
+            let jobs_guard = self.jobs.lock().await;
+            let io_bound_guard = self.io_bound_task_ids.lock().await;
+            let cpu_bound_guard = self.cpu_bound_task_ids.lock().await;
+            let job_data: Vec<(usize, String, Option<f64>)> = jobs_guard.iter()
+                .enumerate()
+                .map(|(idx, job)| (idx, job.id.clone(), job.memory_prediction))
+                .collect();
+            (job_data, io_bound_guard.clone(), cpu_bound_guard.clone())
+        };
+
+        println!("[get_two_jobs] Total jobs available: {}", job_data.len());
+
+        // Find the first job (job1) - any job, we don't care if it's IO-bound, CPU-bound, or mixed
+        let mut job1_idx: Option<usize> = None;
+        let mut job1_memory: usize = 0;
+        let mut job1_is_io_bound: bool = false;
+        let mut job1_is_cpu_bound: bool = false;
+        let mut job1_id: String = String::new();
+        
+        for (idx, task_id, memory_pred) in &job_data {
+            // Check if job is eligible
+            if !self.is_job_eligible(task_id).await {
+                continue;
+            }
+            
+            // Get memory requirement
+            let job_memory = Self::get_job_memory(memory_pred);
+            
+            // Found first job - determine its type
+            job1_idx = Some(*idx);
+            job1_memory = job_memory;
+            job1_id = task_id.clone();
+            job1_is_io_bound = io_bound_task_ids.contains(task_id);
+            job1_is_cpu_bound = cpu_bound_task_ids.contains(task_id);
+            break;
+        }
+        
+        // If no job found, return None
+        let job1_idx = match job1_idx {
+            Some(idx) => {
+                let job1_type = if job1_is_io_bound {
+                    "IO-bound"
+                } else if job1_is_cpu_bound {
+                    "CPU-bound"
+                } else {
+                    "Mixed"
+                };
+                println!("[get_two_jobs] Found job1: id={}, type={}, memory={} KB", 
+                    job1_id, job1_type, job1_memory);
+                idx
+            },
+            None => {
+                println!("[get_two_jobs] No eligible job1 found, returning None");
+                return None;
+            },
+        };
+        
+        println!("[get_two_jobs] Searching for job2 (different type than job1)");
+        
+        // Now find the first job of different type than job1 that fits with job1
+        for (idx, task_id, memory_pred) in &job_data {
+            // Skip if it's the same job as job1
+            if *idx == job1_idx {
+                continue;
+            }
+            
+            // Determine job2's type
+            let job2_is_io_bound = io_bound_task_ids.contains(task_id);
+            let job2_is_cpu_bound = cpu_bound_task_ids.contains(task_id);
+            
+            // Job2 must be of different type than job1
+            // If job1 is IO-bound, job2 must be CPU-bound (or vice versa)
+            // If job1 is neither (truly mixed), job2 can be either IO-bound or CPU-bound
+            let is_different_type = if job1_is_io_bound {
+                // job1 is IO-bound, job2 must be CPU-bound
+                job2_is_cpu_bound
+            } else if job1_is_cpu_bound {
+                // job1 is CPU-bound, job2 must be IO-bound
+                job2_is_io_bound
+            } else {
+                // job1 is mixed (neither), job2 can be either IO-bound or CPU-bound
+                job2_is_io_bound || job2_is_cpu_bound
+            };
+            
+            if !is_different_type {
+                continue;
+            }
+            
+            // Check if job is eligible
+            if !self.is_job_eligible(task_id).await {
+                continue;
+            }
+            
+            // Get memory requirement
+            let job2_memory = Self::get_job_memory(memory_pred);
+            
+            let combined_memory = job1_memory + job2_memory;
+            let job2_type = if job2_is_io_bound {
+                "IO-bound"
+            } else if job2_is_cpu_bound {
+                "CPU-bound"
+            } else {
+                "Mixed"
+            };
+            
+            println!("[get_two_jobs] Checking job2: id={}, type={}, memory={} KB, combined={} KB (capacity={} KB)", 
+                task_id, job2_type, job2_memory, combined_memory, memory_capacity);
+            
+            // Check if combined memory fits
+            if combined_memory <= memory_capacity {
+                // Found a pair! Return both jobs
+                let jobs_guard = self.jobs.lock().await;
+                let job1 = jobs_guard[job1_idx].clone();
+                let job2 = jobs_guard[*idx].clone();
+                println!("[get_two_jobs] ✓ Found pair: job1={} ({} KB), job2={} ({} KB), total={} KB", 
+                    job1.id, job1_memory, job2.id, job2_memory, combined_memory);
+                return Some((job1, job2));
+            } else {
+                println!("[get_two_jobs] ✗ Combined memory {} KB exceeds capacity {} KB", 
+                    combined_memory, memory_capacity);
+            }
+        }
+        
+        println!("[get_two_jobs] No compatible job2 found, returning None");
+        None
+    }
+
     pub async fn add_task(&self, task: Job) {
         let mut guard = self.jobs.lock().await;
         guard.push(task);

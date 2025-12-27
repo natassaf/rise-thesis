@@ -229,6 +229,12 @@ impl SchedulerEngine {
         job
     }
 
+    pub async fn find_two_compatible_jobs(&self, memory_capacity: usize)->Option<(Job, Job)>{
+        // Finds two jobs: first job and first job of different type
+        // whose memory requirements sum is less than the memory capacity
+        // Note: This is never called during sequential run mode
+        self.submitted_jobs.get_two_jobs(memory_capacity).await
+    }
     /// Find a compatible job with fallback logic:
     /// - If IOBound requested but not found, try CPUBound
     /// - If CPUBound requested but not found, try IOBound
@@ -258,14 +264,7 @@ impl SchedulerEngine {
                 }
             }
             JobType::Mixed => {
-                // Try IO-bound first, then CPU-bound, then any job
-                if let Some(job) = self.submitted_jobs.get_next_io_bounded_job(memory_capacity, sequential_run_flag).await {
-                    Some(job)
-                } else if let Some(job) = self.submitted_jobs.get_next_cpu_bounded_job(memory_capacity, sequential_run_flag).await {
-                    Some(job)
-                } else {
-                    self.submitted_jobs.get_next_job(memory_capacity, sequential_run_flag).await
-                }
+                self.submitted_jobs.get_next_job(memory_capacity, sequential_run_flag).await   
             }
             JobType::None => None
         }
@@ -424,32 +423,52 @@ impl SchedulerEngine {
         Ok(())
     }
 
-    pub async fn handle_incoming_message(&self, message_type: MessageType, message: Message) -> Result<(), Error> {
-        match message_type {
-            MessageType::ToSchedulerMessage => {
-            
-                // self.submitted_jobs.print_status().await;
-                let from_worker_message:ToSchedulerMessage = match self.decode_scheduler_message(&message).await {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        eprintln!("Scheduler: Failed to decode scheduler message: {}", e);
-                        return Err(e);
-                    }
-                };
+    pub async fn handle_to_schedule_message(&self, message: &Message, sequential_run_flag: &bool)->Result<(), Error>{
+        let from_worker_message:ToSchedulerMessage = match self.decode_scheduler_message(&message).await {
+            Ok(msg) => msg,
+            Err(e) => {
+                eprintln!("Scheduler: Failed to decode scheduler message: {}", e);
+                return Err(e);
+            }
+        };
+        let active_workers = self.active_workers.lock().await;
+        // If the worker is not active just send no job found so worker doesn't hang
+        if !active_workers.contains(&from_worker_message.worker_id){
+            drop(active_workers);
+            let response_message = self.encode_response(None, &from_worker_message).await;
+            self.send_message(&[from_worker_message.worker_id], &response_message).await?;
+            return Ok(());   
+        }
+        drop(active_workers);
+        
+        // Check if worker requested 2 jobs (only when not in sequential run mode)
+        if from_worker_message.num_jobs == 2 && !*sequential_run_flag {
+            println!("[Scheduler] Worker {} requested 2 jobs with memory_capacity: {} KB", 
+                from_worker_message.worker_id, from_worker_message.memory_capacity);
+            // Try to find a pair of jobs (first job + different type)
+            if let Some((job1, job2)) = self.find_two_compatible_jobs(from_worker_message.memory_capacity).await {
+                println!("[Scheduler] ✓ Found pair for worker {}: job1={}, job2={}", 
+                    from_worker_message.worker_id, job1.id, job2.id);
+                // Add both jobs to pending
+                self.submitted_jobs.add_to_pending(&job1.id).await;
+                self.submitted_jobs.add_to_pending(&job2.id).await;
                 
-                // In sequential mode, only allow active workers to get jobs
-                let sequential_run_flag = *self.sequential_run_flag.lock().await;
-                if sequential_run_flag {
-                    let active_workers = self.active_workers.lock().await;
-                    if !active_workers.contains(&from_worker_message.worker_id) {
-                        // Worker is not active, send NotFound response so worker doesn't hang
-                        let response_message = self.encode_response(None, &from_worker_message).await;
-                        self.send_message(&[from_worker_message.worker_id], &response_message).await?;
-                        return Ok(());
-                    }
-                    drop(active_workers);
-                }
-                let job_to_send = self.find_compatible_job_with_fallback(&from_worker_message).await;
+                // Remove from reschedule_job_ids if they're there
+                let mut reschedule = self.submitted_jobs.reschedule_job_ids.lock().await;
+                reschedule.remove(&job1.id);
+                reschedule.remove(&job2.id);
+                drop(reschedule);
+                
+                // Send both jobs as separate messages
+                let response_message1 = self.encode_response(Some(job1), &from_worker_message).await;
+                let response_message2 = self.encode_response(Some(job2), &from_worker_message).await;
+                self.send_message(&[from_worker_message.worker_id], &response_message1).await?;
+                self.send_message(&[from_worker_message.worker_id], &response_message2).await?;
+            } else {
+                println!("[Scheduler] ✗ No pair found for worker {}, falling back to single job", 
+                    from_worker_message.worker_id);
+                // No pair found - fallback to single job
+                let job_to_send = self.submitted_jobs.get_next_job(from_worker_message.memory_capacity, *sequential_run_flag).await;
                 
                 // If a job was found, add it to pending_job_ids and remove it from reschedule_job_ids
                 if let Some(ref job) = job_to_send {
@@ -466,10 +485,43 @@ impl SchedulerEngine {
                     self.submitted_jobs.move_next_job_to_reschedule().await;
                 }
                 
-                // Always send a response to the worker (either Found or NotFound)
+                // Send single job response (or NotFound)
                 let response_message = self.encode_response(job_to_send, &from_worker_message).await;
                 self.send_message(&[from_worker_message.worker_id], &response_message).await?;
             }
+        } else {
+            // Single job request (num_jobs == 1 or default)
+            let job_to_send = self.find_compatible_job_with_fallback(&from_worker_message).await;
+            
+            // If a job was found, add it to pending_job_ids and remove it from reschedule_job_ids
+            if let Some(ref job) = job_to_send {
+                self.submitted_jobs.add_to_pending(&job.id).await;
+                let job_id = job.id.clone();
+                
+                // Remove from reschedule_job_ids if it's there (we're retrying it)
+                let mut reschedule = self.submitted_jobs.reschedule_job_ids.lock().await;
+                reschedule.remove(&job_id);
+                drop(reschedule);
+            }
+            else {
+                // No job found - move next job that is not in pending to reschedule
+                self.submitted_jobs.move_next_job_to_reschedule().await;
+            }
+            
+            // Always send a response to the worker (either Found or NotFound)
+            let response_message = self.encode_response(job_to_send, &from_worker_message).await;
+            self.send_message(&[from_worker_message.worker_id], &response_message).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn handle_incoming_message(&self, message_type: MessageType, message: Message) -> Result<(), Error> {
+        match message_type {
+            MessageType::ToSchedulerMessage => {
+                let sequential_run_flag = *self.sequential_run_flag.lock().await;
+                self.handle_to_schedule_message(&message, &sequential_run_flag).await?;
+                }
             MessageType::TaskStatusMessage=> {
                 let task_status_message = self.decode_task_status_message(&message).await.unwrap();
                 let sequential_run_flag = *self.sequential_run_flag.lock().await;

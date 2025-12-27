@@ -294,14 +294,16 @@ impl Worker {
         *flag = true;
     }
 
+
     /// Send a job request to scheduler with parameters worker_id, job_type, memory_capacity
-    pub async fn request_tasks(&self, job_type: JobType) {
+    pub async fn request_tasks(&self, job_type: JobType, num_jobs:usize) {
         let available_memory = get_available_memory_kb();
         // Create ToSchedulerMessage with the required fields
         let to_scheduler_msg = ToSchedulerMessage {
             worker_id: self.worker_id,
             memory_capacity: available_memory,
             job_type: job_type.clone(),
+            num_jobs: num_jobs
         };
 
         // Serialize the message to JSON
@@ -503,12 +505,11 @@ impl Worker {
                 // Request tasks based on num_concurrent_tasks
                 let num_tasks = *self.num_concurrent_tasks.lock().await;
                 if num_tasks == 1 && !request_flag {
-                    self.request_tasks(JobType::Mixed).await;
+                    self.request_tasks(JobType::Mixed, 1).await;
                     sent_requests = 1;
                     request_flag = true;
                 } else if num_tasks == 2 && !request_flag {
-                    self.request_tasks(JobType::IOBound).await;
-                    self.request_tasks(JobType::CPUBound).await;
+                    self.request_tasks(JobType::Mixed, 2).await;
                     sent_requests = 2;
                     request_flag = true;
                 }

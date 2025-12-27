@@ -36,6 +36,7 @@ pub struct ToSchedulerMessage {
     pub worker_id: usize,
     pub memory_capacity: usize,
     pub job_type: JobType,
+    pub num_jobs: usize
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
