@@ -75,14 +75,9 @@ impl EvaluationMetrics {
     }
 
     pub async fn initialize(&self, task_ids: Vec<String>){
-        let num_tasks = task_ids.len();
         let start_time = std::time::Instant::now();
         self.set_execution_start_time(start_time);
         self.initialize_task_status(task_ids).await;
-        let total_tasks = self.get_total_tasks().await;
-        println!("Evaluation metrics: Initializing task status with {} task IDs", num_tasks);
-        println!("=== Execution start time set at {:?} ===", start_time);
-        println!("Start executing {} tasks", total_tasks);
     }
 
     pub async fn are_all_tasks_completed(&self) -> bool {
@@ -104,15 +99,12 @@ impl EvaluationMetrics {
         response_times.insert(task_id, response_time);
     }
 
-    pub fn get_response_time_per_task(&self) -> Arc<StdMutex<HashMap<String, Duration>>> {
-        self.response_time_per_task.clone()
-    }
+    // pub fn get_response_time_per_task(&self) -> Arc<StdMutex<HashMap<String, Duration>>> {
+    //     self.response_time_per_task.clone()
+    // }
 
     pub async fn initialize_task_status(&self, task_ids: Vec<String>) {
         if task_ids.is_empty() {
-            println!(
-                "EvaluationMetrics: Warning - initialize_task_status called with empty task_ids list"
-            );
             return;
         }
 
@@ -120,21 +112,15 @@ impl EvaluationMetrics {
         let mut completed_count = self.completed_count.lock().await;
         
         // Always reset for new batch to avoid stale state
-        // Clear old tasks and reset completed count
-        let old_count = task_status.len();
         task_status.clear();
+
+        // Clear old tasks and reset completed count
         *completed_count = 0;
         
         // Initialize with new tasks
         for task_id in task_ids.into_iter() {
             task_status.insert(task_id, 0); // 0 = not processed
         }
-        
-        println!(
-            "EvaluationMetrics: Initialized task status with {} new tasks (cleared {} old tasks)",
-            task_status.len(),
-            old_count
-        );
     }
 
 pub async fn set_task_status(&self, task_id: String, status: u8) {
@@ -143,7 +129,6 @@ pub async fn set_task_status(&self, task_id: String, status: u8) {
     task_status.insert(task_id, status);
     
     // Increment completed count if task moves from unprocessed (0) to any processed status (1=success, 2=failed)
-    // This ensures both successful and failed jobs are counted as completed
     if previous_status == 0 && status != 0 {
         *self.completed_count.lock().await += 1;
     }
@@ -178,7 +163,7 @@ pub async fn set_task_status(&self, task_id: String, status: u8) {
     }
 
     pub async fn get_peak_memory(&self)->u64{
-       // Prefer cgroup peak memory (more accurate when running with cgroup limits like systemd-run)
+       // Uses cgroup peak memory as our experiments run with cgroup limits like systemd-run
        // Falls back to process peak RSS (VmHWM) if cgroup is not available
        get_peak_memory_from_cgroup_kb()
            .or_else(|| get_peak_memory_kb())
@@ -222,7 +207,5 @@ pub fn store_evaluation_metrics(
 
     if let Err(e) = std::fs::write("results/evaluation_metrics.txt", metrics_content) {
         eprintln!("Failed to write evaluation metrics to file: {}", e);
-    } else {
-        println!("Evaluation metrics written to results/evaluation_metrics.txt");
     }
 }

@@ -4,8 +4,7 @@ use crate::optimized_scheduling_preprocessing::scheduler_algorithms::{
 };
 use actix_web::web;
 
-/// JobsOrderOptimizer handles task prediction and sorting independently of the scheduler
-/// This allows predict_and_sort to run without needing to acquire the scheduler mutex
+// Handles sorting of tasks 
 pub struct JobsOrderOptimizer {
     submitted_jobs: web::Data<SubmittedJobs>,
 }
@@ -29,8 +28,6 @@ impl JobsOrderOptimizer {
             ),
         };
 
-        println!("=== Starting predictions and sorting with {} algorithm ===", scheduling_algorithm);
-
         // Schedule tasks using the selected algorithm (does predictions and sorting)
         let (io_bound_task_ids, cpu_bound_task_ids) =
             scheduler_algo.prioritize_tasks(&self.submitted_jobs).await;
@@ -44,6 +41,7 @@ impl JobsOrderOptimizer {
             .await;
 
         println!("=== Predictions and sorting completed ===");
+        println!("JobsOrderOptimizer: predict_and_sort function returning");
     }
 }
 

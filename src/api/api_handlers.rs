@@ -2,7 +2,6 @@ use crate::api::api_objects::{ExecuteTasksRequest, Job, SubmittedJobs, TaskQuery
 use crate::evaluation_metrics::{EvaluationMetrics};
 use crate::jobs_order_optimizer::{JobsOrderOptimizer};
 use crate::optimized_scheduling_preprocessing::features_extractor::TaskBoundType;
-use crate::memory_monitoring::{get_peak_memory_kb, get_peak_memory_from_cgroup_kb};
 use actix_web::{HttpResponse, Responder, web};
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -24,8 +23,8 @@ pub async fn handle_predict_and_sort(
 ) -> impl Responder {
     let jobs_order_optimizer = app_data.lock().await;
     let scheduling_algorithm = task.into_inner().scheduling_algorithm;
-    println!("Predicting and sorting tasks with {} algorithm", scheduling_algorithm);
     jobs_order_optimizer.predict_and_sort(scheduling_algorithm).await;
+    drop(jobs_order_optimizer);
     HttpResponse::Ok().body(format!("Predictions and sorting completed"))
 }
 
@@ -50,7 +49,6 @@ pub async fn handle_execute_tasks(
 }
 
 pub async fn handle_get_result(query: web::Query<TaskQuery>) -> impl Responder {
-    println!("Running get result for task {}", query.id);
     // Return compressed result
     let compressed_path = format!("results/result_{}.gz", query.id);
     let uncompressed_path = format!("results/result_{}.txt", query.id);
@@ -88,15 +86,7 @@ pub async fn handle_submit_task(
     // Reads the json request and adds the job to the job logger. Returns response immediatelly to client
     let job: Job = task.into_inner().into();
     submitted_tasks.add_task(job).await;
-    println!(
-        "Number of tasks waiting: {:?}",
-        submitted_tasks.get_num_tasks().await
-    );
-    // Get peak memory: prefer cgroup (more accurate), fallback to process RSS
-    let peak_memory = get_peak_memory_from_cgroup_kb()
-        .or_else(|| get_peak_memory_kb())
-        .unwrap_or(0);
-    println!("max memory: {} KB", peak_memory);
+    println!("Submitted tasks count: {}", submitted_tasks.num_jobs.lock().await);
     HttpResponse::Ok().body("Task submitted")
 }
 
@@ -112,6 +102,7 @@ pub async fn handle_generate_predictions(
     _app_data: web::Data<Arc<Mutex<JobsOrderOptimizer>>>,
     submitted_jobs: web::Data<SubmittedJobs>,
 ) -> impl Responder {
+    
     const BATCH_SIZE: usize = 20;
     const PREDICTIONS_FILE: &str = "feature_predictions/predictions.json";
 
@@ -121,7 +112,8 @@ pub async fn handle_generate_predictions(
         return HttpResponse::BadRequest().body("No jobs submitted");
     }
 
-    println!("Generating predictions for {} jobs", jobs.len());
+    // Start timing
+    let start_time = std::time::Instant::now();
 
     // Create utils instance to extract features and run predictions
     use crate::optimized_scheduling_preprocessing::scheduler_algorithms::SchedulerAlgorithmUtils;
@@ -133,6 +125,15 @@ pub async fn handle_generate_predictions(
     // Process predictions in batches
     let (job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type) =
         utils.process_predictions_in_batches(&feature_results, BATCH_SIZE).await;
+
+    // Calculate timing metrics
+    let total_time = start_time.elapsed();
+    let num_tasks = jobs.len();
+    let avg_time_per_task = if num_tasks > 0 {
+        total_time.as_secs_f64() / num_tasks as f64
+    } else {
+        0.0
+    };
 
     // Combine predictions into a single HashMap
     let mut predictions: HashMap<String, PredictionData> = HashMap::new();
@@ -167,8 +168,8 @@ pub async fn handle_generate_predictions(
         return HttpResponse::InternalServerError().body(format!("Failed to write predictions file: {}", e));
     }
 
-    println!("Predictions saved to {}", PREDICTIONS_FILE);
-    println!("Generated predictions for {} jobs", predictions.len());
-
-    HttpResponse::Ok().body(format!("Predictions generated and saved to {}", PREDICTIONS_FILE))
+    HttpResponse::Ok().body(format!(
+        "Predictions generated and saved to {}. Total time: {:.3}s, Average time per task: {:.3}s ({} tasks)",
+        PREDICTIONS_FILE, total_time.as_secs_f64(), avg_time_per_task, num_tasks
+    ))
 }

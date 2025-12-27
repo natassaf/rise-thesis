@@ -1,5 +1,5 @@
 # Scheduler configuration
-pin_cores: false
+pin_cores: true
 num_workers: 4
-num_concurrent_tasks: 2
+num_concurrent_tasks: 1
 

@@ -54,7 +54,7 @@ async fn main() -> std::io::Result<()> {
     let evaluation_metrics = Arc::new(EvaluationMetrics::new());
     let request_running_flag = web::Data::new(Mutex::new(false));
     
-    // Create and start scheduler. Scheduler
+    // Create and start scheduler
     let scheduler = {
         let scheduler = Arc::new(Mutex::new(SchedulerEngine::new(
             core_ids,
@@ -93,8 +93,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(workers_notification_channel.clone()))
             .app_data(web::Data::new(evaluation_metrics.clone()))
             .app_data(jobs_order_optimizer.clone());
-            // .app_data(request_running_flag.clone());
-
+        
         app = app.route("/submit_task", web::post().to(handle_submit_task));
         app = app.route("/get_result", web::get().to(handle_get_result));
         app = app.route("/predict_and_sort", web::post().to(handle_predict_and_sort));

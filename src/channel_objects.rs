@@ -55,7 +55,6 @@ pub struct TaskStatusMessage{
 pub enum JobAskStatus {
     Found,
     NotFound,
-    OutofBoundsJob,
     Terminate,
 }
 

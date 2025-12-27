@@ -105,7 +105,6 @@ impl Worker {
                         }
                     }
                 }
-                println!("Loaded {} task memory mappings from {}", map.len(), csv_path);
             }
             Err(e) => {
                 eprintln!("Warning: Failed to load {}: {}. Task memory checks will be skipped.", csv_path, e);
@@ -139,11 +138,6 @@ impl Worker {
 
         if let Err(e) = self.worker_channel_tx.send((MessageType::TaskStatusMessage, message)).await {
             eprintln!("Worker {}: Failed to send TaskStatusMessage: {}", self.worker_id, e);
-        } else {
-            println!(
-                "Worker {}: Sent task status for task {}: {:?}",
-                self.worker_id, task_id, status
-            );
         }
     }
 
@@ -153,8 +147,6 @@ impl Worker {
         let result_string = format!("Result: {}", result);
         std::fs::write(&file_name, &result_string)
             .expect("Failed to write uncompressed result to file");
-        println!("Stored result for task {}: {} ", task_id, result_string.len()
-        );
     }
 
     /// Store compressed result of wasm component execution for the user to retrieve 
@@ -171,18 +163,11 @@ impl Worker {
         }
         std::fs::write(&file_name, &compressed_data)
             .expect("Failed to write compressed result to file");
-
-        println!(
-            "Stored compressed result for task {}: {} bytes -> {} bytes",
-            task_id,
-            result_string.len(),
-            compressed_data.len()
-        );
     }
 
 
     pub async fn run_wasm_job_component(
-        core_id: CoreId,
+        _core_id: CoreId,
         task_id: String,
         component_name: String,
         func_name: String,
@@ -192,11 +177,6 @@ impl Worker {
         evaluation_metrics: Arc<EvaluationMetrics>,
         start_time: std::time::Instant,
     ) -> Result<(String, Result<Vec<Val>, anyhow::Error>), anyhow::Error> {
-        println!("Task {task_id} running on core {:?}", core_id);
-        println!(
-            "Running component {:?}, func: {:?}",
-            component_name, func_name
-        );
 
         // Load function - only the component loading needs the lock (for cache access)
         // The actual instantiation happens in the worker's own store (parallel)
@@ -218,7 +198,6 @@ impl Worker {
             Ok(val) => Self::store_result_uncompressed(&task_id, &format!("{:?}", val)),
             Err(e) => Self::store_result_uncompressed(&task_id, &format!("Error: {:?}", e)),
         }
-        println!("Finished wasm task {}", task_id);
 
         // Set response time
         let end_time = std::time::Instant::now();
@@ -241,20 +220,11 @@ impl Worker {
                     "Worker {}: Insufficient memory for task {}. Required: {} KB, Available: {} KB",
                     self.worker_id, task_id, required_mem, current_memory
                 );
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 // Send failure status and return early
                 self.send_task_status(task_id.clone(), Status::Failed).await;
                 return Status::Failed;
             }
-            println!(
-                "Worker {}: Memory check passed for task {}. Required: {} KB, Available: {} KB",
-                self.worker_id, task_id, required_mem, current_memory
-            );
-        } else {
-            println!(
-                "Worker {}: No memory requirement found for task {}, proceeding with execution",
-                self.worker_id, task_id
-            );
         }
 
         // Decompress payload if needed
@@ -315,14 +285,7 @@ impl Worker {
         };
 
         // Send success status
-        // Note: Task status is set in the scheduler when it receives this message
         self.send_task_status(completed_task_id.clone(), Status::Success).await;
-
-        // // Check if all tasks are completed
-        // if self.evaluation_metrics.are_all_tasks_completed().await {
-        //     self.evaluation_metrics.all_tasks_completed_callback().await;
-        // }
-
         Status::Success
     }
 
@@ -334,7 +297,6 @@ impl Worker {
     /// Send a job request to scheduler with parameters worker_id, job_type, memory_capacity
     pub async fn request_tasks(&self, job_type: JobType) {
         let available_memory = get_available_memory_kb();
-        println!("Available memory {}", available_memory);
         // Create ToSchedulerMessage with the required fields
         let to_scheduler_msg = ToSchedulerMessage {
             worker_id: self.worker_id,
@@ -359,11 +321,6 @@ impl Worker {
             "Worker {}: Failed to send message to scheduler: {}",
             self.worker_id, e
         )});
-
-        println!(
-            "Worker {}: Sent task request to scheduler (job_type: {:?}, memory: {})",
-            self.worker_id, job_type, available_memory
-        );
     }
 
     /// Receive messages from Scheduler
@@ -381,36 +338,14 @@ impl Worker {
                             Ok(to_worker_msg) => match to_worker_msg.status {
                                 JobAskStatus::Found => {
                                     tasks.push(to_worker_msg.job);
-                                    let num_tasks = *self.num_concurrent_tasks.lock().await;
-                                    println!(
-                                        "Worker {}: Received job from scheduler ({} of {})",
-                                        self.worker_id,
-                                        tasks.len(),
-                                        num_tasks
-                                    );
                                 }
                                 JobAskStatus::Terminate => {
-                                    println!(
-                                        "Worker {}: Received terminate message from scheduler",
-                                        self.worker_id
-                                    );
-                                    // self.shutdown().await;
                                     termination_flag=true;
                                     return (termination_flag, tasks);
                                 }
                                 JobAskStatus::NotFound => {
-                                    println!(
-                                        "Worker {}: Job not found from scheduler",
-                                        self.worker_id
-                                    );
-                                    tokio::time::sleep(tokio::time::Duration::from_secs(1))
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(100))
                                         .await;
-                                }
-                                JobAskStatus::OutofBoundsJob => {
-                                    println!(
-                                        "Worker {}: Out of bounds job from scheduler",
-                                        self.worker_id
-                                    );
                                 }
                             },
                             Err(e) => {
@@ -423,41 +358,26 @@ impl Worker {
                     }
                     MessageType::ToSchedulerMessage => {
                         // This shouldn't happen - worker shouldn't receive ToSchedulerMessage
-                        println!(
-                            "Worker {}: Received unexpected ToSchedulerMessage",
-                            self.worker_id
-                        );
                     },
                     MessageType::TaskStatusMessage =>{
-                        // This shouldn't happen - worker shouldn't receive ToSchedulerMessage
-                        println!(
-                            "Worker {}: Received unexpected ToSchedulerMessage",
-                            self.worker_id
-                        );
+                        // This shouldn't happen - worker shouldn't receive TaskStatusMessage
                     }
                 }
             }
             None => {
-                println!(
-                    "Worker {}: Channel closed while waiting for scheduler response",
-                    self.worker_id
-                )
+                // Channel closed
             }
         }
 
         drop(rx); // Release the lock
 
-        println!( "Worker {}: Collected {} tasks from scheduler", self.worker_id, tasks.len());
         return (termination_flag, tasks);
     }
 
     // Works only when executed on linux.
     // Prints available memory a task predicted memory
-    pub fn print_memort_status(&self, task: &Job){
-        let available_memory = get_available_memory_kb();
-        let task_memory = task.memory_prediction.unwrap_or(0.0) as usize;
-        println!("Before running check: task memory: {}, available memory {}", task_memory, available_memory);
-
+    pub fn print_memort_status(&self, _task: &Job){
+        // Memory status printing removed
     }
 
     pub async fn process_task(&self, tasks_to_process: &mut Vec<Job> ){
@@ -466,7 +386,7 @@ impl Worker {
                 1 => {
                     let task = tasks_to_process.pop().unwrap();
                     self.print_memort_status(&task);
-                    let task_status =self.run_task(task).await;
+                    self.run_task(task).await;
                     
                     // Clear store after single task completes
                     // All Func objects from this task are already dropped
@@ -486,12 +406,8 @@ impl Worker {
                     handlers.push(self.run_task(task_1));
                     handlers.push(self.run_task(task_2));
                     
-                    if handlers.is_empty() {
-                        println!("Worker {}: Both tasks skipped due to insufficient memory", self.worker_id);
-                    } else {
-                        // Wait for all concurrent tasks to complete
-                        futures::future::join_all(handlers).await;
-                    }
+                    // Wait for all concurrent tasks to complete
+                    futures::future::join_all(handlers).await;
                     
                     // Clear store AFTER all concurrent tasks complete
                     // This ensures no Func objects from the old store are still in use
@@ -529,7 +445,6 @@ impl Worker {
             
             // If we received termination, stop receiving immediately
             if termination_flag_local {
-                println!("Worker {}: Received termination, stopping further requests", self.worker_id);
                 break;
             }
         }
@@ -539,12 +454,8 @@ impl Worker {
     /// Worker background loop -> sends job request messages to scheduler and receives them
     /// When terminating it stops 
     pub async fn start(&self) {
-        println!( "Worker: {:?} started on core id : {:?}", self.worker_id, self.core_id);
-        
         // Wait for signal to start processing (from execute_jobs endpoint)
         self.workers_notification_channel.notified().await;
-
-        println!("Worker {}: Starting to process tasks", self.worker_id);
         let mut request_flag = false;
         let mut tasks_to_process: Vec<Job> = Vec::new();
         let mut termination_flag=false;
@@ -553,7 +464,6 @@ impl Worker {
             {
                 let mut flag = self.shutdown_flag.lock().await;
                 if *flag {
-                    println!("Worker: {:?} shutting down", self.worker_id);
                     *flag = false;
                     return;
                 }
@@ -569,7 +479,6 @@ impl Worker {
                     let mut loader = self.wasm_loader.lock().await;
                     // Use aggressive clear which recreates both store and linker
                     loader.clear_memory("models");
-                    println!("Worker {}: Aggressively cleared WASM store and linker, all memory freed", self.worker_id);
                 }
                 
                 // Drop the tasks vector to free memory
@@ -580,9 +489,7 @@ impl Worker {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
                 // Now go idle and wait for notification
-                println!("Worker {}: Idle, waiting for notification to resume", self.worker_id);
                 self.workers_notification_channel.notified().await;
-                println!("Worker {}: Resuming task processing", self.worker_id);
                 termination_flag = false;
                 request_flag = false; // Reset request flag when resuming
                 continue; 
@@ -615,8 +522,7 @@ impl Worker {
             // If tasks are empty -> wait a bit and continue
             if tasks_to_process.is_empty() {
                 request_flag = false;
-                // Don't check for completion - only terminate when scheduler sends termination message
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                // tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                 continue;
             }
             else{

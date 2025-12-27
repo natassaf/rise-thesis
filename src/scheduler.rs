@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::collections::{HashSet, HashMap};
+use std::collections::HashSet;
 use std::time::Duration;
 use anyhow::Error;
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -28,8 +28,8 @@ pub struct SchedulerEngine {
     pin_cores: bool,
     worker_requests: Arc<Mutex<HashSet<usize>>>, // Track which workers have sent job requests
     sequential_run_flag: Arc<Mutex<bool>>, // when true run all remaining jobs on one worker
-    active_workers: Arc<Mutex<Vec<usize>>>,
-    consecutive_not_found_count: Arc<Mutex<HashMap<usize, usize>>>, // Track consecutive NotFound responses per worker
+    active_workers: Arc<Mutex<Vec<usize>>>, // Track which workers are active
+    worker_thread_handles: Arc<Mutex<Vec<Option<std::thread::JoinHandle<()>>>>>, // Store worker thread handles to kill them when needed
 }
 
 
@@ -85,7 +85,7 @@ impl SchedulerEngine {
             worker_requests: Arc::new(Mutex::new(HashSet::new())),
             sequential_run_flag: Arc::new(Mutex::new(false)) ,
             active_workers: Arc::new(Mutex::new(Vec::new())),
-            consecutive_not_found_count: Arc::new(Mutex::new(HashMap::new())),
+            worker_thread_handles: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -136,10 +136,7 @@ impl SchedulerEngine {
                 if pin_cores_clone {
                     let res = core_affinity::set_for_current(worker.core_id);
                     if res {
-                        println!(
-                            "Worker {} main thread pinned to core {}",
-                            worker.core_id.id, worker.core_id.id
-                        );
+                        // Worker pinned to core
                     } else {
                         eprintln!(
                             "Failed to pin worker {} to core {}",
@@ -162,19 +159,25 @@ impl SchedulerEngine {
             handlers.push(handler);
         }
 
-        Ok(handlers)
+        // Store the handles in the scheduler for later use
+        // We need to move them, so we'll store them and return a reference
+        // Actually, we can't return moved values. Let's store them and return empty vec
+        // But main.rs might need them... Let's check if we can change the approach
+        let mut stored_handles = self.worker_thread_handles.lock().await;
+        for handler in handlers {
+            stored_handles.push(Some(handler));
+        }
+        drop(stored_handles);
+
+        // Return empty vec since we stored them internally
+        // Main.rs doesn't seem to use the return value anyway
+        Ok(vec![])
     }
 
     pub async fn decode_scheduler_message(&self, message: &Message) -> Result<ToSchedulerMessage, anyhow::Error> {
         let message_from_worker = serde_json::from_str::<ToSchedulerMessage>(&message.message);
         let message_from_worker:ToSchedulerMessage = match message_from_worker{
             Ok(msg)=> {
-                println!(
-                    "Scheduler: Received task request from worker {} (job_type: {:?}, memory: {})",
-                    msg.worker_id,
-                    msg.job_type,
-                    msg.memory_capacity
-                );
                 msg
             },
             Err(_) => {
@@ -188,12 +191,6 @@ impl SchedulerEngine {
         let task_status = serde_json::from_str::<TaskStatusMessage>(&message.message);
         let task_status: TaskStatusMessage = match task_status {
             Ok(msg) => {
-                println!(
-                    "Scheduler: Received task status from worker {} for job {} (status: {:?})",
-                    msg.worker_id,
-                    msg.job_id,
-                    msg.status
-                );
                 msg
             },
             Err(e) => {
@@ -232,13 +229,54 @@ impl SchedulerEngine {
         job
     }
 
+    /// Find a compatible job with fallback logic:
+    /// - If IOBound requested but not found, try CPUBound
+    /// - If CPUBound requested but not found, try IOBound
+    /// - For Mixed, use the existing logic (try both types)
+    /// - For None, return None
+    pub async fn find_compatible_job_with_fallback(&self, msg: &ToSchedulerMessage) -> Option<Job> {
+        let sequential_run_flag = *self.sequential_run_flag.lock().await;
+        let memory_capacity = msg.memory_capacity;
+        
+        match msg.job_type {
+            JobType::IOBound => {
+                // Try IOBound first
+                if let Some(job) = self.submitted_jobs.get_next_io_bounded_job(memory_capacity, sequential_run_flag).await {
+                    Some(job)
+                } else {
+                    // Fallback to CPUBound
+                    self.submitted_jobs.get_next_cpu_bounded_job(memory_capacity, sequential_run_flag).await
+                }
+            }
+            JobType::CPUBound => {
+                // Try CPUBound first
+                if let Some(job) = self.submitted_jobs.get_next_cpu_bounded_job(memory_capacity, sequential_run_flag).await {
+                    Some(job)
+                } else {
+                    // Fallback to IOBound
+                    self.submitted_jobs.get_next_io_bounded_job(memory_capacity, sequential_run_flag).await
+                }
+            }
+            JobType::Mixed => {
+                // Try IO-bound first, then CPU-bound, then any job
+                if let Some(job) = self.submitted_jobs.get_next_io_bounded_job(memory_capacity, sequential_run_flag).await {
+                    Some(job)
+                } else if let Some(job) = self.submitted_jobs.get_next_cpu_bounded_job(memory_capacity, sequential_run_flag).await {
+                    Some(job)
+                } else {
+                    self.submitted_jobs.get_next_job(memory_capacity, sequential_run_flag).await
+                }
+            }
+            JobType::None => None
+        }
+    }
+
     pub async fn encode_response(&self, job:Option<Job>, to_scheduler_msg:&ToSchedulerMessage)-> Message{
         match job{
             Some(this_job)=> {
                 // Only send job if execution has started
                 if self.evaluation_metrics.get_execution_start_time().is_none() {
                     // Execution not started yet, don't send job - it would be skipped and lost
-                    println!("Scheduler: Execution not started yet, re-adding job {} to avoid loss", this_job.id);
                     // Re-add job to the list (it was already removed, so we need to add it back)
                     self.submitted_jobs.add_task(this_job.clone()).await;
                     // Return NotFound so worker can retry later
@@ -265,12 +303,6 @@ impl SchedulerEngine {
                         message_type: MessageType::ToWorkerMessage,
                     }
                 } else {
-                    // Job found - reset consecutive NotFound count for this worker
-                    let worker_id = to_scheduler_msg.worker_id;
-                    let mut not_found_count = self.consecutive_not_found_count.lock().await;
-                    not_found_count.insert(worker_id, 0); // Reset count
-                    drop(not_found_count);
-                    
                     let to_worker_msg = ToWorkerMessage{
                                 status: JobAskStatus::Found,
                                 job:this_job,
@@ -284,18 +316,7 @@ impl SchedulerEngine {
                 }
             },
             None=>{
-                {
-                    // No job found - just return NotFound
-                    // Increment consecutive NotFound count for this worker
-                    let worker_id = to_scheduler_msg.worker_id;
-                    let mut not_found_count = self.consecutive_not_found_count.lock().await;
-                    let count = not_found_count.entry(worker_id).or_insert(0);
-                    *count += 1;
-                    println!("Scheduler: Worker {} consecutive NotFound count: {}", worker_id, *count);
-                    drop(not_found_count);
-                    
-                    // Don't check for termination here because jobs might still be in-flight with workers
-                    // Termination will be checked after task completion in handle_incoming_message
+                {                    
                     let to_worker_msg = ToWorkerMessage {
                         status: JobAskStatus::NotFound,
                         job: Job {
@@ -328,53 +349,16 @@ impl SchedulerEngine {
 
         let scheduler_txs = self.scheduler_txs.lock().await;
         for id in worker_ids.iter(){
-            println!("Scheduler: Send message from worker: {}", id);
-            scheduler_txs[*id].send((MessageType::ToWorkerMessage, response_message.clone())).await.unwrap_or_else(|e| eprintln!("Unable to send to {}", id));
+            if let Err(e) = scheduler_txs[*id].send((MessageType::ToWorkerMessage, response_message.clone())).await {
+                eprintln!("Scheduler: Unable to send to worker {}: {}", id, e);
+            }
         }
-        drop(self.scheduler_txs.clone());
+        // Lock guard will be dropped naturally when it goes out of scope
         Ok(())
     }
 
-    pub async fn check_no_job_found_termination(&self) -> bool {
-        // if active workers have received no job found more than 3 times and sequential run flag is true return true
-        let sequential_run_flag = *self.sequential_run_flag.lock().await;
-        // Only check if sequential mode is active
-        if !sequential_run_flag {
-            return false;
-        }
-        
-        // Check if active workers have consecutive_not_found_count > 3
-        let active_workers = self.active_workers.lock().await;
-        let not_found_count = self.consecutive_not_found_count.lock().await;
-        
-        if active_workers.is_empty() {
-            drop(active_workers);
-            drop(not_found_count);
-            return false;
-        }
-        
-        // Check if all active workers have received no job found more than 3 times
-        let all_received_no_job_more_than_3 = active_workers.iter().all(|&worker_id| {
-            not_found_count.get(&worker_id).copied().unwrap_or(0) > 3
-        });
-        
-        drop(active_workers);
-        drop(not_found_count);
-        
-        if all_received_no_job_more_than_3 {
-            println!("Scheduler: All active workers have received no job found more than 3 times in sequential mode - termination condition met");
-        }
-        
-        all_received_no_job_more_than_3
-    }
 
     pub async fn check_for_termination(&self)->bool{
-        // First check if we should terminate due to no job found in sequential mode
-        // This takes priority because if all active workers can't find jobs, we should terminate
-        // even if there are jobs in the queue (they might be stuck/unprocessable)
-        if self.check_no_job_found_termination().await {
-            return true;
-        }
         
         // Check SubmittedJobs termination condition
         // This handles both cases:
@@ -443,54 +427,46 @@ impl SchedulerEngine {
     pub async fn handle_incoming_message(&self, message_type: MessageType, message: Message) -> Result<(), Error> {
         match message_type {
             MessageType::ToSchedulerMessage => {
-                self.submitted_jobs.print_status().await;
-                let from_worker_message:ToSchedulerMessage = self.decode_scheduler_message(&message).await.unwrap();
+            
+                // self.submitted_jobs.print_status().await;
+                let from_worker_message:ToSchedulerMessage = match self.decode_scheduler_message(&message).await {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        eprintln!("Scheduler: Failed to decode scheduler message: {}", e);
+                        return Err(e);
+                    }
+                };
                 
                 // In sequential mode, only allow active workers to get jobs
                 let sequential_run_flag = *self.sequential_run_flag.lock().await;
                 if sequential_run_flag {
                     let active_workers = self.active_workers.lock().await;
                     if !active_workers.contains(&from_worker_message.worker_id) {
-                        // Worker is not active, don't send job
-                        println!("Scheduler: Worker {} is not active (sequential mode), ignoring job request", from_worker_message.worker_id);
+                        // Worker is not active, send NotFound response so worker doesn't hang
                         let response_message = self.encode_response(None, &from_worker_message).await;
                         self.send_message(&[from_worker_message.worker_id], &response_message).await?;
                         return Ok(());
                     }
                     drop(active_workers);
                 }
-                
-                let job_to_send = self.find_compatible_job(&from_worker_message).await;
+                let job_to_send = self.find_compatible_job_with_fallback(&from_worker_message).await;
                 
                 // If a job was found, add it to pending_job_ids and remove it from reschedule_job_ids
                 if let Some(ref job) = job_to_send {
+                    self.submitted_jobs.add_to_pending(&job.id).await;
                     let job_id = job.id.clone();
-                    let mut pending = self.submitted_jobs.pending_job_ids.lock().await;
-                    pending.insert(job_id.clone());
-                    drop(pending);
                     
                     // Remove from reschedule_job_ids if it's there (we're retrying it)
                     let mut reschedule = self.submitted_jobs.reschedule_job_ids.lock().await;
-                    if reschedule.remove(&job_id) {
-                        println!("Scheduler: Removed job {} from reschedule_job_ids (retrying)", job_id);
-                    }
+                    reschedule.remove(&job_id);
                     drop(reschedule);
-                    
-                    println!("Scheduler: Added job {} to pending_job_ids (sending to worker {})", job_id, from_worker_message.worker_id);
+                }
+                else {
+                    // No job found - move next job that is not in pending to reschedule
+                    self.submitted_jobs.move_next_job_to_reschedule().await;
                 }
                 
-                // check if this workers count no job is >10 and if it is don't send any message
-                if job_to_send.is_none() {
-                    let not_found_count = self.consecutive_not_found_count.lock().await;
-                    let count = not_found_count.get(&from_worker_message.worker_id).copied().unwrap_or(0);
-                    drop(not_found_count);
-                    
-                    if count >= 5 {
-                        println!("Scheduler: Worker {} has consecutive NotFound count {} >= 5, waiting 3 seconds", from_worker_message.worker_id, count);
-                        tokio::time::sleep(Duration::from_secs(3)).await;
-                    }
-                }
-                
+                // Always send a response to the worker (either Found or NotFound)
                 let response_message = self.encode_response(job_to_send, &from_worker_message).await;
                 self.send_message(&[from_worker_message.worker_id], &response_message).await?;
             }
@@ -499,8 +475,6 @@ impl SchedulerEngine {
                 let sequential_run_flag = *self.sequential_run_flag.lock().await;
                 match task_status_message.status {
                     crate::channel_objects::Status::Success => {
-                        // Update evaluation metrics: mark task as completed (success)
-                        // Note: Worker also sets this, but we set it here for consistency with failed jobs
                         // Using status=1 to indicate success
                         self.evaluation_metrics.set_task_status(task_status_message.job_id.clone(), 1).await;
                         
@@ -511,17 +485,11 @@ impl SchedulerEngine {
                         
                         // Remove from pending_job_ids and add to successfull_job_ids
                         let mut pending = self.submitted_jobs.pending_job_ids.lock().await;
-                        let was_in_pending = pending.remove(&task_status_message.job_id);
+                        pending.remove(&task_status_message.job_id);
                         drop(pending);
-                        if was_in_pending {
-                            println!("Scheduler: Task {} removed from pending_job_ids (success)", task_status_message.job_id);
-                        } else {
-                            println!("Scheduler: WARNING - Task {} was not in pending_job_ids when succeeded", task_status_message.job_id);
-                        }
                         self.submitted_jobs.add_to_succesfull(&task_status_message.job_id).await;
                         self.submitted_jobs.remove_job(task_status_message.job_id.clone()).await;
                         self.remove_from_reschedule(&task_status_message.job_id).await;
-                        println!("Scheduler: Task {} succeeded, moved to successful", task_status_message.job_id);
                     },
                     crate::channel_objects::Status::Failed => {
                         // Update evaluation metrics: mark task as completed (failed)
@@ -530,14 +498,10 @@ impl SchedulerEngine {
                         
                         // Remove from pending_job_ids first
                         let mut pending = self.submitted_jobs.pending_job_ids.lock().await;
-                        let was_in_pending = pending.remove(&task_status_message.job_id);
+                        pending.remove(&task_status_message.job_id);
                         drop(pending);
-                        if was_in_pending {
-                            println!("Scheduler: Task {} removed from pending_job_ids (failure)", task_status_message.job_id);
-                        } else {
-                            println!("Scheduler: WARNING - Task {} was not in pending_job_ids when failed", task_status_message.job_id);
-                        }
                         
+                        // Remove from reschedule
                         // Check if job is in reschedule_job_ids before removing it
                         let mut reschedule = self.submitted_jobs.reschedule_job_ids.lock().await;
                         let was_in_reschedule = reschedule.contains(&task_status_message.job_id);
@@ -551,23 +515,18 @@ impl SchedulerEngine {
                                 self.submitted_jobs.add_to_failed(&task_status_message.job_id).await;
                                 // Remove from jobs list when it goes to failed_job_ids
                                 self.submitted_jobs.remove_job(task_status_message.job_id.clone()).await;
-                                println!("Scheduler: Task {} failed, moved to failed_job_ids and removed from jobs list (sequential mode, not in reschedule)", task_status_message.job_id);
-                            } else {
-                                println!("Scheduler: Task {} failed but is in reschedule, will be retried (not added to failed_job_ids)", task_status_message.job_id);
                             }
                         } else {
                             // If sequential_run_flag is false, add to reschedule_job_ids
                             let mut reschedule = self.submitted_jobs.reschedule_job_ids.lock().await;
                             reschedule.insert(task_status_message.job_id.clone());
                             drop(reschedule);
-                            println!("Scheduler: Task {} failed, moved to reschedule_job_ids", task_status_message.job_id);
                         }
                     }
                 }
             },
             MessageType::ToWorkerMessage => {
-                println!("Scheduler: Received unexpected ToWorkerMessage");
-
+                // Unexpected message type
             }
         }
 
@@ -575,7 +534,6 @@ impl SchedulerEngine {
     }
 
     pub async fn shutdown(&mut self) {
-        println!("Shutting down scheduler and all workers...");
         for worker in &self.workers {
             worker.shutdown().await;
         }
@@ -584,48 +542,30 @@ impl SchedulerEngine {
     async fn remove_from_reschedule(&self, job_id: &str) {
         // Check if the job ID is in reschedule_job_ids and remove it if present
         let mut reschedule = self.submitted_jobs.reschedule_job_ids.lock().await;
-        if reschedule.remove(job_id) {
-            println!("Scheduler: Removed job {} from reschedule_job_ids (job succeeded)", job_id);
-        }
+        reschedule.remove(job_id);
     }
 
-    async fn reset_not_found_counters_for_active_workers(&self) {
-        // Reset consecutive NotFound counters for all active workers
-        let active_workers = self.active_workers.lock().await;
-        let mut not_found_count = self.consecutive_not_found_count.lock().await;
-        for &worker_id in active_workers.iter() {
-            not_found_count.insert(worker_id, 0);
-        }
-        drop(active_workers);
-        drop(not_found_count);
-        println!("Scheduler: Reset consecutive NotFound counters for all active workers");
-    }
 
     pub async fn reset_for_new_batch(&self) {
-        // Reset all scheduler state variables for a new batch of tasks
-        println!("Scheduler: Resetting state for new batch");
-        
-        // Completely reinitialize evaluation metrics to avoid stale state
         self.evaluation_metrics.reset().await;
-        println!("Scheduler: Reset evaluation metrics");
-        
-        // Clear consecutive NotFound counts
-        let mut not_found_count = self.consecutive_not_found_count.lock().await;
-        not_found_count.clear();
-        drop(not_found_count);
         
         // Reset sequential run flag
         let mut sequential_flag = self.sequential_run_flag.lock().await;
         *sequential_flag = false;
         drop(sequential_flag);
         
-        // Reset active workers to include all workers
+        // Reset active workers to include only workers that are still alive (have thread handles)
+        // Workers that were killed in sequential mode won't have thread handles anymore
         let mut active_workers = self.active_workers.lock().await;
+        let handles = self.worker_thread_handles.lock().await;
         active_workers.clear();
-        for worker in &self.workers {
-            active_workers.push(worker.worker_id);
+        for (idx, worker) in self.workers.iter().enumerate() {
+            // Only add worker if it still has a thread handle (thread is still running)
+            if handles.get(idx).and_then(|h| h.as_ref()).is_some() {
+                active_workers.push(worker.worker_id);
+            }
         }
-        println!("Scheduler: Reset active_workers to include all {} workers", active_workers.len());
+        drop(handles);
         drop(active_workers);
         
         // Reset worker requests
@@ -641,8 +581,6 @@ impl SchedulerEngine {
             let num_consurrent_tasks = config.num_concurrent_tasks.unwrap_or(1);
             worker.set_num_concurrent_tasks(num_consurrent_tasks).await;
         }
-        
-        println!("Scheduler: State reset complete for new batch");
     }
 
     async fn move_pending_back_to_reschedule(&self){
@@ -652,7 +590,6 @@ impl SchedulerEngine {
         let mut reschedule = self.submitted_jobs.reschedule_job_ids.lock().await;
         
         let jobs_to_move: Vec<String> = pending.iter().cloned().collect();
-        let moved_count = jobs_to_move.len();
         
         // Remove from pending and add to reschedule
         for job_id in &jobs_to_move {
@@ -662,131 +599,108 @@ impl SchedulerEngine {
         
         drop(pending);
         drop(reschedule);
-        
-        if moved_count > 0 {
-            println!("Scheduler: Moved {} job(s) from pending_job_ids back to reschedule_job_ids for sequential retry", moved_count);
-        }
-    }
-
-    async fn check_job_not_found_status(&self, threshold: usize) -> bool {
-        // Check if all active workers have consecutive_not_found_count greater than threshold
-        let active_workers = self.active_workers.lock().await;
-        let not_found_count = self.consecutive_not_found_count.lock().await;
-        
-        if active_workers.is_empty() {
-            drop(active_workers);
-            drop(not_found_count);
-            return false;
-        }
-        
-        let all_received_no_job = active_workers.iter().all(|&worker_id| {
-            not_found_count.get(&worker_id).copied().unwrap_or(0) > threshold
-        });
-        
-        drop(active_workers);
-        drop(not_found_count);
-        
-        all_received_no_job
     }
 
     async fn move_all_jobs_to_reschedule(&self) {
         // Move all jobs on submitted jobs to reschedule
         // Only moves jobs that are not already successful or failed
         let jobs = self.submitted_jobs.get_jobs().await;
-        let mut reschedule = self.submitted_jobs.reschedule_job_ids.lock().await;
-        let successfull = self.submitted_jobs.successfull_job_ids.lock().await;
-        let failed = self.submitted_jobs.failed_job_ids.lock().await;
-        let mut pending = self.submitted_jobs.pending_job_ids.lock().await;
-
-        let mut moved_count = 0;
+        
+        // Collect job IDs that need to be moved (checking exclusion sets one at a time)
+        let mut job_ids_to_move = Vec::new();
         for job in &jobs {
             let job_id = &job.id;
-            // Only move jobs that are not already successful or failed
-            if !successfull.contains(job_id) && !failed.contains(job_id) {
-                // Remove from pending if present
-                pending.remove(job_id);
-                // Add to reschedule if not already there
-                if reschedule.insert(job_id.clone()) {
-                    moved_count += 1;
-                }
+            
+            // Check if job is successful (acquire lock, check, release)
+            let in_successful = {
+                let successfull = self.submitted_jobs.successfull_job_ids.lock().await;
+                successfull.contains(job_id)
+            };
+            if in_successful {
+                continue;
             }
+            
+            // Check if job has failed (acquire lock, check, release)
+            let in_failed = {
+                let failed = self.submitted_jobs.failed_job_ids.lock().await;
+                failed.contains(job_id)
+            };
+            if in_failed {
+                continue;
+            }
+            
+            // Job is eligible to be moved
+            job_ids_to_move.push(job_id.clone());
         }
-
-        drop(reschedule);
-        drop(successfull);
-        drop(failed);
-        drop(pending);
-
-        if moved_count > 0 {
-            println!("Scheduler: Moved {} job(s) to reschedule_job_ids (all workers received no job)", moved_count);
+        
+        // Now perform the moves, acquiring locks only when needed
+        for job_id in &job_ids_to_move {
+            // Remove from pending if present
+            {
+                let mut pending = self.submitted_jobs.pending_job_ids.lock().await;
+                pending.remove(job_id);
+            }
+            
+            // Add to reschedule if not already there
+            {
+                let mut reschedule = self.submitted_jobs.reschedule_job_ids.lock().await;
+                reschedule.insert(job_id.clone());
+            }
         }
     }
 
     async fn activate_sequential_mode(&self) {
-        use crate::memory_monitoring::get_available_memory_kb;
-        
         // Check if sequential mode is already activated to prevent multiple calls
         let sequential_flag = *self.sequential_run_flag.lock().await;
         if sequential_flag {
-            println!("Scheduler: Sequential mode already activated, skipping");
             return;
         }
         
-        // Log memory before clearing (at the start of activation)
-        let memory_before = get_available_memory_kb();
-        println!("Scheduler: Memory before clearing workers: {} KB", memory_before);
+        println!("=== Transitioning to sequential run mode ===");
         
-        // Terminate all workers except worker 0
-        let workers_to_terminate: Vec<usize> = (1..self.workers.len()).map(|i| self.workers[i].worker_id).collect();
-        if let Err(e) = self.send_termination_message(workers_to_terminate.clone()).await {
-            eprintln!("Scheduler: Error sending termination message: {:?}", e);
+        // Kill workers 1, 2, 3 completely
+        let workers_to_kill: Vec<usize> = (1..self.workers.len()).map(|i| self.workers[i].worker_id).collect();
+        
+        // First, send shutdown signal to workers
+        for &worker_id in &workers_to_kill {
+            if let Some(worker) = self.workers.get(worker_id) {
+                worker.shutdown().await;
+            }
         }
         
-        // Wait for workers to receive termination message and start clearing
-        println!("Scheduler: Waiting for workers to receive termination and start clearing memory...");
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Wait a bit for workers to process shutdown
+        tokio::time::sleep(Duration::from_secs(5)).await;
         
-        // Now wait longer for workers to actually clear memory and go idle
-        println!("Scheduler: Waiting for workers to clear memory...");
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Now kill the worker threads completely by detaching them
+        // We detach instead of joining because workers might be stuck in async operations (like notified().await)
+        // Detaching allows the threads to finish on their own when they check the shutdown flag
+        // The threads will exit when they reach the shutdown check in their loop
+        let mut handles = self.worker_thread_handles.lock().await;
+        for &worker_id in &workers_to_kill {
+            handles.get_mut(worker_id).and_then(|h| h.take());
+        }
+        drop(handles);
         
-        // Check memory after initial wait
-        let memory_after = get_available_memory_kb();   
-        let memory_freed =  memory_after - memory_before;   
-        println!("Scheduler: Memory after clearing workers: {} KB (freed: {} KB, {:.1}% of initial)", 
-            memory_after, 
-            memory_freed,
-            if memory_before > 0 { (memory_freed as f64 / memory_before as f64) * 100.0 } else { 0.0 });
-
-
-        // Remove terminated workers from active_workers
+        // Remove killed workers from active_workers
         let mut w = self.active_workers.lock().await;
-        // Remove terminated workers by value, not by index
-        for worker_id in &workers_to_terminate {
+        // Remove killed workers by value, not by index
+        for worker_id in &workers_to_kill {
             w.retain(|&id| id != *worker_id);
         }
         // Ensure worker 0 is in active_workers (it's the only active worker in sequential mode)
         if !w.contains(&0) {
             w.push(0);
-            println!("Scheduler: Added worker 0 to active_workers for sequential mode");
         }
         drop(w);
-
-        // reset job not found counters for all active workers
-        self.reset_not_found_counters_for_active_workers().await;
 
         // Set worker 0's num_concurrent_tasks to 1 for sequential execution
         if let Some(worker_0) = self.workers.get(0) {
             worker_0.set_num_concurrent_tasks(1).await;
-            println!("Scheduler: Set worker 0's num_concurrent_tasks to 1 for sequential execution");
         }
 
         self.move_pending_back_to_reschedule().await;
-        
-        self.submitted_jobs.print_status().await;
 
         let mut flag = self.sequential_run_flag.lock().await;
-        println!("Sequential flag set to true");
         *flag = true;
     }
 
@@ -796,65 +710,51 @@ impl SchedulerEngine {
         let mut counter = 0;
         loop {   
             // Receive message from a worker
-            println!("Iteration number: {}", counter);
             counter += 1;
             match rx.recv().await {
                 Some((message_type, message)) => {
-                    let _res = self.handle_incoming_message(message_type, message).await;
+                    if let Err(e) = self.handle_incoming_message(message_type, message).await {
+                        eprintln!("Scheduler: Error handling incoming message: {}", e);
+                    }
                 } 
                 None => {
-                    println!("Scheduler: Channel closed, exiting message loop");
                     break;
                 }
             }
+
+            // Print periodic status every 100 iterations
+            if counter % 100 == 0 {
+                self.submitted_jobs.print_status_summary().await;
+            }
+
             let all_in_reschedule = self.submitted_jobs.are_all_jobs_in_reschedule().await;
             let sequential_run_flag = *self.sequential_run_flag.lock().await;
         
-            // Check if all workers received no job
-            let all_workers_received_no_job = self.check_job_not_found_status(1).await;
-            // if all_workers_received_no_job {
-            //     self.move_all_jobs_to_reschedule().await;
-            // }
-            
-            // Activate sequential mode if all jobs are in reschedule OR all workers received no job
-            // Only activate if not already in sequential mode
-            if !sequential_run_flag && (all_in_reschedule || all_workers_received_no_job) {
+            // If all jobs in reschedule activate sequential mode
+            if !sequential_run_flag && all_in_reschedule {
                 self.activate_sequential_mode().await;
-                
             }
-            
 
             // check for termination
-            // Note: check_for_termination handles both cases: jobs in queue and jobs completed (removed from queue)
             if self.check_for_termination().await {
-                let completed_count = self.evaluation_metrics.get_completed_count().await;
-                let total_tasks = self.evaluation_metrics.get_total_tasks().await;
-                println!("Scheduler: Termination check - completed: {}, total: {}, match: {}", 
-                        completed_count, total_tasks, completed_count == total_tasks);
-                
-                // Print termination report
-                self.submitted_jobs.termination_report().await;
-                
-                // Get failed and successful job counts
+                // Get failed and successful job counts to store in evaluation metrics
                 let jobs_failed = self.submitted_jobs.get_failed_count().await;
                 let jobs_succeeded = self.submitted_jobs.get_successful_count().await;
+                let jobs_pending = self.submitted_jobs.get_pending_count().await;
+                let jobs_rescheduled = self.submitted_jobs.get_reschedule_count().await;
                 
-                // Print evaluation metrics before resetting
+                // Print final status
+                println!("=== Final Status ===");
+                println!("Successful: {}, Failed: {}, Pending: {}, Rescheduled: {}", 
+                    jobs_succeeded, jobs_failed, jobs_pending, jobs_rescheduled);
+                
+                // Print evaluation metrics
                 self.evaluation_metrics.all_tasks_completed_callback(jobs_failed, jobs_succeeded).await;
                 
-                // Print job status summary
-                self.submitted_jobs.print_status().await;
-                
-                println!("Scheduler: All tasks completed! Sending termination messages to all workers...");
                 self.broadcast_termination_message().await.unwrap();
                 
                 // Reset scheduler state for next batch
                 self.reset_for_new_batch().await;
-                
-                // Don't break - continue the loop to wait for new tasks
-                // The loop will continue and process new tasks when they arrive
-                println!("Scheduler: Waiting for new tasks...");
-                // Continue the loop instead of breaking
             }
         }
     }
