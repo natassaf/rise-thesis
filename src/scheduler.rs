@@ -745,9 +745,22 @@ impl SchedulerEngine {
         }
         drop(w);
 
+        // Wait longer for OS to reclaim memory from killed workers
+        // This is critical for Improvement1 which had more concurrent executions
+        // The cgroup's memory.current includes memory from killed workers until OS reclaims it
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
         // Set worker 0's num_concurrent_tasks to 1 for sequential execution
         if let Some(worker_0) = self.workers.get(0) {
             worker_0.set_num_concurrent_tasks(1).await;
+            
+            // Clear worker 0's WASM memory to free up memory from previous concurrent executions
+            // This ensures consistent available memory when sequential mode starts
+            worker_0.clear_wasm_memory().await;
+            
+            // Wait a bit longer to allow OS to reclaim memory from Rust allocator
+            // This is especially important after many concurrent executions (Improvement1)
+            tokio::time::sleep(Duration::from_secs(3)).await;
         }
 
         self.move_pending_back_to_reschedule().await;

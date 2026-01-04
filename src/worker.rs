@@ -211,14 +211,15 @@ impl Worker {
         let task_id = task.id.clone();
 
         // Check memory requirement before executing
+        let sequential_mode = *self.num_concurrent_tasks.lock().await == 1;
         let current_memory = get_available_memory_kb();
         let required_memory = self.task_memory_map.get(&task_id).copied();
         
         if let Some(required_mem) = required_memory {
             if current_memory <= required_mem {
                 eprintln!(
-                    "Worker {}: Insufficient memory for task {}. Required: {} KB, Available: {} KB",
-                    self.worker_id, task_id, required_mem, current_memory
+                    "Worker {}: Insufficient memory for task {}. Required: {} KB, Available: {} KB (sequential_mode: {})",
+                    self.worker_id, task_id, required_mem, current_memory, sequential_mode
                 );
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 // Send failure status and return early
@@ -294,6 +295,21 @@ impl Worker {
         *flag = true;
     }
 
+    pub async fn clear_wasm_memory(&self) {
+        let mut loader = self.wasm_loader.lock().await;
+        loader.clear_memory("models");
+        
+        // Force memory reclamation by allocating and dropping large vectors
+        // This helps the Rust allocator return memory to the OS, especially important
+        // after many concurrent executions (Improvement1) where more memory may be retained
+        for _ in 0..3 {
+            let mut large_vec: Vec<u8> = Vec::with_capacity(10 * 1024 * 1024); // 10MB
+            large_vec.resize(10 * 1024 * 1024, 0);
+            drop(large_vec);
+            // Small delay to allow OS to reclaim memory
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
 
     /// Send a job request to scheduler with parameters worker_id, job_type, memory_capacity
     pub async fn request_tasks(&self, job_type: JobType, num_jobs:usize) {
@@ -440,7 +456,25 @@ impl Worker {
         let mut received_count = 0;
         let mut termination_flag_local = false;
         while received_count < expected_responses {
-            let (new_termination_flag, new_tasks) = self.receive_tasks().await;
+            // If we're waiting for a second response, use a timeout since pairs arrive almost simultaneously
+            // If no second response arrives within 100ms, continue with what we have
+            let (new_termination_flag, new_tasks) = if received_count > 0 && expected_responses == 2 {
+                // Wait up to 100ms for the second response
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_millis(100),
+                    self.receive_tasks()
+                ).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        // Timeout - no second response arrived, continue with what we have
+                        break;
+                    }
+                }
+            } else {
+                // First response or single job request - wait indefinitely
+                self.receive_tasks().await
+            };
+            
             tasks_to_process.extend(new_tasks);
             received_count += 1;
             termination_flag_local = new_termination_flag;

@@ -31,10 +31,18 @@ pub fn get_cgroup_path() -> Option<PathBuf> {
     for line in data.lines() {
         let parts: Vec<&str> = line.splitn(3, ':').collect();
         if parts.len() == 3 {
-            // parts[2] is the relative path
+            // For cgroup v2, format is: 0::/path/to/cgroup
+            // parts[0] = hierarchy ID (0 for v2)
+            // parts[1] = controller list (empty for v2)
+            // parts[2] = cgroup path
+            let cgroup_path = parts[2].trim_start_matches('/');
             let mut path = PathBuf::from("/sys/fs/cgroup");
-            path.push(parts[2].trim_start_matches('/'));
-            return Some(path);
+            path.push(cgroup_path);
+            
+            // Verify the path exists and has memory.max
+            if path.join("memory.max").exists() {
+                return Some(path);
+            }
         }
     }
     None
