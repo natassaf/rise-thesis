@@ -486,13 +486,9 @@ impl SchedulerEngine {
                 }
                 
                 // Send single job response (or NotFound)
+                // Worker will wait 10ms for a second response if it expected 2 jobs
                 let response_message = self.encode_response(job_to_send, &from_worker_message).await;
                 self.send_message(&[from_worker_message.worker_id], &response_message).await?;
-                
-                // Worker requested 2 jobs but we only sent 1, so send a second NotFound response
-                // to prevent the worker from hanging while waiting for the second response
-                let not_found_response = self.encode_response(None, &from_worker_message).await;
-                self.send_message(&[from_worker_message.worker_id], &not_found_response).await?;
             }
         } else {
             // Single job request (num_jobs == 1 or default)

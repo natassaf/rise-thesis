@@ -476,11 +476,11 @@ impl Worker {
         let mut termination_flag_local = false;
         while received_count < expected_responses {
             // If we're waiting for a second response, use a timeout since pairs arrive almost simultaneously
-            // If no second response arrives within 100ms, continue with what we have
+            // If no second response arrives within 10ms, continue with what we have
             let (new_termination_flag, new_tasks) = if received_count > 0 && expected_responses == 2 {
-                // Wait up to 100ms for the second response
+                // Wait up to 10ms for the second response
                 match tokio::time::timeout(
-                    tokio::time::Duration::from_millis(100),
+                    tokio::time::Duration::from_millis(10),
                     self.receive_tasks()
                 ).await {
                     Ok(result) => result,
@@ -576,6 +576,9 @@ impl Worker {
 
             if tasks_to_process.is_empty() {
                 request_flag = false;
+                // If we received NotFound (no tasks), wait 100ms before next iteration
+                // This prevents busy-waiting when no jobs are available
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 continue;
             }
             else{
