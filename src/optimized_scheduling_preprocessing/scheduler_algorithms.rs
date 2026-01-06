@@ -193,9 +193,9 @@ impl SchedulerAlgorithm for Improvement1{
         // Load predictions from file - only for jobs we need (no feature extraction or model loading)
         const PREDICTIONS_FILE: &str = "feature_predictions/predictions.json";
         
-        // Use scoping to ensure predictions HashMaps are dropped after use
         let (cpu_bound_task_ids, io_bound_task_ids) = {
-            let (job_id_to_memory_prediction, job_id_to_time_prediction, job_id_to_task_bound_type) = 
+            // Only load task_bound_type, ignore memory and time predictions
+            let (_, _, job_id_to_task_bound_type) = 
                 load_predictions_from_file(PREDICTIONS_FILE, &job_ids)
                     .unwrap_or_else(|e| {
                         eprintln!("[ERROR] Failed to load predictions from {}: {}", PREDICTIONS_FILE, e);
@@ -203,17 +203,14 @@ impl SchedulerAlgorithm for Improvement1{
                         std::process::exit(1);
                     });
             
-            println!("Loaded predictions for {} jobs from {} (no feature extraction or model loading)", job_ids.len(), PREDICTIONS_FILE);
+            println!("Loaded task type predictions for {} jobs from {}", job_ids.len(), PREDICTIONS_FILE);
 
-            // Update jobs with memory predictions, time predictions and task bound type (no parallel iterator needed)
+            // Update jobs with task bound type and set memory to 0
             let mut jobs = submitted_jobs.jobs.lock().await;
             for job in jobs.iter_mut() {
-                if let Some(prediction) = job_id_to_memory_prediction.get(&job.id) {
-                    job.memory_prediction = Some(*prediction);
-                }
-                if let Some(prediction) = job_id_to_time_prediction.get(&job.id) {
-                    job.execution_time_prediction = Some(*prediction);
-                }
+                // Set memory prediction to 0 (default)
+                job.memory_prediction = Some(0.0);
+                // Don't set execution_time_prediction (keep as None)
                 if let Some(bound_type) = job_id_to_task_bound_type.get(&job.id) {
                     job.task_bound_type = Some(*bound_type);
                 }
@@ -232,8 +229,6 @@ impl SchedulerAlgorithm for Improvement1{
                         io_bound_task_ids.push(job.id.clone());
                     }
                     _ => {
-                        // For Mixed or None, we can decide based on heuristics or add to both
-                        // For now, let's add Mixed tasks to CPU-bound as a default
                         cpu_bound_task_ids.push(job.id.clone());
                     }
                 }
@@ -253,9 +248,7 @@ impl SchedulerAlgorithm for Improvement1{
                 io_bound_task_ids.len()
             );
             
-            // Explicitly drop HashMaps after sorting to free memory
-            drop(job_id_to_memory_prediction);
-            drop(job_id_to_time_prediction);
+            // Explicitly drop HashMap after use
             drop(job_id_to_task_bound_type);
             
             (cpu_bound_task_ids, io_bound_task_ids)
@@ -517,27 +510,14 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm {
                 }
             }
 
-            // Sort jobs:
-            // 1. First by execution time from largest to shortest (descending)
-            // 2. Then by memory prediction from shortest to largest (ascending)
-            // This way, when we pop() from the end, we get the job with shortest time and largest memory
+            // Sort jobs by execution time from largest to shortest (descending)
+            // This way, when we pop() from the end, we get the job with shortest time
             jobs.sort_by(|a, b| {
                 let a_time = a.execution_time_prediction.unwrap_or(0.0);
                 let b_time = b.execution_time_prediction.unwrap_or(0.0);
-                let a_mem = a.memory_prediction.unwrap_or(0.0);
-                let b_mem = b.memory_prediction.unwrap_or(0.0);
 
-                // First sort by execution time: descending (shortesr first, largest last)
-                match a_time.partial_cmp(&b_time) {
-                    Some(std::cmp::Ordering::Equal) => {
-                        // If execution times are equal, sort by memory: ascending (smallest first, largest last)
-                        a_mem
-                            .partial_cmp(&b_mem)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    }
-                    Some(ordering) => ordering,
-                    None => std::cmp::Ordering::Equal,
-                }
+                // Sort by execution time: descending (shortest first, largest last)
+                a_time.partial_cmp(&b_time).unwrap_or(std::cmp::Ordering::Equal)
             });
 
             // Use the jobs we already have locked instead of calling get_jobs() again

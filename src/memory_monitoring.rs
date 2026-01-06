@@ -77,3 +77,67 @@ pub fn get_available_memory_kb() -> usize {
     
     available_memory_kb
 }
+
+/// Force memory reclamation by temporarily setting memory.high below memory.current
+/// This triggers the kernel's memory reclaimer to free up "ghost memory" from killed processes
+/// This is an async function that should be called from async context to avoid blocking
+pub async fn trigger_memory_reclamation() -> bool {
+    let cgroup_path = match get_cgroup_path() {
+        Some(path) => path,
+        None => return false,
+    };
+    
+    let memory_high_path = cgroup_path.join("memory.high");
+    let memory_current_path = cgroup_path.join("memory.current");
+    
+    // Read current memory usage
+    let current_bytes = match fs::read_to_string(&memory_current_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+    {
+        Some(val) => val,
+        None => return false,
+    };
+    
+    // Don't trigger if current usage is very low (nothing to reclaim)
+    if current_bytes < 100 * 1024 * 1024 { // Less than 100MB
+        return false;
+    }
+    
+    // Read current memory.high (if set)
+    let original_high = fs::read_to_string(&memory_high_path)
+        .ok()
+        .and_then(|s| {
+            let trimmed = s.trim();
+            if trimmed == "max" {
+                None
+            } else {
+                trimmed.parse::<u64>().ok()
+            }
+        });
+    
+    // Set memory.high to 95% of current usage (less aggressive to avoid throttling)
+    // This creates memory pressure that forces the kernel to reclaim memory
+    let target_high_bytes = (current_bytes * 95) / 100;
+    
+    // Write the new memory.high value
+    if fs::write(&memory_high_path, target_high_bytes.to_string()).is_err() {
+        return false;
+    }
+    
+    // Wait for kernel to process the reclamation (use async sleep to avoid blocking)
+    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+    
+    // Restore original memory.high (or "max" if it wasn't set) immediately
+    // Don't wait too long with memory.high set low to avoid throttling
+    let restore_value = match original_high {
+        Some(val) => val.to_string(),
+        None => "max".to_string(),
+    };
+    let _ = fs::write(&memory_high_path, restore_value);
+    
+    // Additional wait to allow reclamation to complete (after restoring)
+    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+    
+    true
+}

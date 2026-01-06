@@ -437,7 +437,7 @@ impl SubmittedJobs {
                 memory_pred.unwrap_or(0.0) as usize
             };
 
-            if job_memory <= memory_capacity {
+            if job_memory <= memory_capacity{
                 // Only NOW clone the full Job object when we found a match
                 let jobs_guard = self.jobs.lock().await;
                 return Some(jobs_guard[*idx].clone());

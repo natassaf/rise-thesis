@@ -488,6 +488,11 @@ impl SchedulerEngine {
                 // Send single job response (or NotFound)
                 let response_message = self.encode_response(job_to_send, &from_worker_message).await;
                 self.send_message(&[from_worker_message.worker_id], &response_message).await?;
+                
+                // Worker requested 2 jobs but we only sent 1, so send a second NotFound response
+                // to prevent the worker from hanging while waiting for the second response
+                let not_found_response = self.encode_response(None, &from_worker_message).await;
+                self.send_message(&[from_worker_message.worker_id], &not_found_response).await?;
             }
         } else {
             // Single job request (num_jobs == 1 or default)
@@ -632,6 +637,8 @@ impl SchedulerEngine {
             let config = load_config();
             let num_consurrent_tasks = config.num_concurrent_tasks.unwrap_or(1);
             worker.set_num_concurrent_tasks(num_consurrent_tasks).await;
+            // Reset worker_sequential_flag for all workers
+            worker.set_worker_sequential_flag(false).await;
         }
     }
 
@@ -745,22 +752,47 @@ impl SchedulerEngine {
         }
         drop(w);
 
-        // Wait longer for OS to reclaim memory from killed workers
-        // This is critical for Improvement1 which had more concurrent executions
-        // The cgroup's memory.current includes memory from killed workers until OS reclaims it
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // Wait for workers to fully shut down
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        
+        // Trigger kernel memory reclamation by temporarily setting memory.high
+        // This forces the kernel to reclaim "ghost memory" from killed workers
+        // that's still counted in memory.current but not actually available
+        println!("[Memory Reclamation] Triggering kernel memory reclamation...");
+        let initial_memory = crate::memory_monitoring::get_available_memory_kb();
+        let reclamation_success = crate::memory_monitoring::trigger_memory_reclamation().await;
+        if reclamation_success {
+            let reclaimed_memory = crate::memory_monitoring::get_available_memory_kb();
+            println!("[Memory Reclamation] Available memory: {} KB -> {} KB (reclaimed: {} KB)", 
+                     initial_memory, reclaimed_memory, reclaimed_memory.saturating_sub(initial_memory));
+        } else {
+            println!("[Memory Reclamation] Failed to trigger reclamation (cgroup not available?)");
+        }
+        
+        // Additional wait to allow kernel to finish reclamation
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         // Set worker 0's num_concurrent_tasks to 1 for sequential execution
         if let Some(worker_0) = self.workers.get(0) {
             worker_0.set_num_concurrent_tasks(1).await;
             
+            // Set worker_sequential_flag to true so worker 0 knows to clean memory between tasks
+            worker_0.set_worker_sequential_flag(true).await;
+            
             // Clear worker 0's WASM memory to free up memory from previous concurrent executions
             // This ensures consistent available memory when sequential mode starts
             worker_0.clear_wasm_memory().await;
             
-            // Wait a bit longer to allow OS to reclaim memory from Rust allocator
-            // This is especially important after many concurrent executions (Improvement1)
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            // Trigger another round of reclamation after clearing WASM memory
+            println!("[Memory Reclamation] Triggering kernel memory reclamation after WASM clear...");
+            let before_clear = crate::memory_monitoring::get_available_memory_kb();
+            let _ = crate::memory_monitoring::trigger_memory_reclamation().await;
+            let after_clear = crate::memory_monitoring::get_available_memory_kb();
+            println!("[Memory Reclamation] Available memory after clear: {} KB -> {} KB (reclaimed: {} KB)", 
+                     before_clear, after_clear, after_clear.saturating_sub(before_clear));
+            
+            // Final wait to allow OS to stabilize memory state
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
         self.move_pending_back_to_reschedule().await;

@@ -40,6 +40,7 @@ pub struct Worker {
     workers_notification_channel: Arc<Notify>, 
     evaluation_metrics: Arc<EvaluationMetrics>, // Reference to evaluation metrics
     num_concurrent_tasks: Arc<Mutex<usize>>, // Mutable to allow changing in sequential mode
+    worker_sequential_flag: Arc<Mutex<bool>>, // Flag set by scheduler when sequential mode is active
     task_memory_map: Arc<HashMap<String, usize>>, // HashMap of task_id -> memory_kb
 }
 
@@ -79,6 +80,7 @@ impl Worker {
             workers_notification_channel,
             evaluation_metrics,
             num_concurrent_tasks: Arc::new(Mutex::new(num_concurrent_tasks)),
+            worker_sequential_flag: Arc::new(Mutex::new(false)),
             task_memory_map,
         }
     }
@@ -87,6 +89,12 @@ impl Worker {
     pub async fn set_num_concurrent_tasks(&self, num: usize) {
         let mut num_tasks = self.num_concurrent_tasks.lock().await;
         *num_tasks = num;
+    }
+
+    /// Set worker_sequential_flag (set by scheduler when sequential mode is activated)
+    pub async fn set_worker_sequential_flag(&self, flag: bool) {
+        let mut sequential_flag = self.worker_sequential_flag.lock().await;
+        *sequential_flag = flag;
     }
 
     /// Load task_to_memory_kb.csv into a HashMap
@@ -307,7 +315,7 @@ impl Worker {
             large_vec.resize(10 * 1024 * 1024, 0);
             drop(large_vec);
             // Small delay to allow OS to reclaim memory
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 
@@ -400,6 +408,9 @@ impl Worker {
 
     pub async fn process_task(&self, tasks_to_process: &mut Vec<Job> ){
         if !tasks_to_process.is_empty() {
+            // Check if worker sequential flag is set (sequential mode is active)
+            let sequential_mode = *self.worker_sequential_flag.lock().await;
+            
             match tasks_to_process.len() {
                 1 => {
                     let task = tasks_to_process.pop().unwrap();
@@ -411,6 +422,14 @@ impl Worker {
                     {
                         let mut loader = self.wasm_loader.lock().await;
                         loader.clear_store("models");
+                    }
+                    
+                    // In sequential mode, clear memory after each task
+                    // to ensure the next task starts with clean memory
+                    if sequential_mode {
+                        self.clear_wasm_memory().await;
+                        // Trigger kernel-level memory reclamation via cgroup memory.high
+                        let _ = crate::memory_monitoring::trigger_memory_reclamation().await;
                     }
                     
                 }
@@ -554,14 +573,20 @@ impl Worker {
                 termination_flag = self.receive_responses_handler(&mut tasks_to_process, sent_requests).await;
             }
 
-            // If tasks are empty -> wait a bit and continue
+
             if tasks_to_process.is_empty() {
                 request_flag = false;
-                // tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                 continue;
             }
             else{
                 self.process_task(&mut tasks_to_process).await;
+                
+                // In sequential mode, wait a bit after processing tasks (and cleaning memory)
+                // before requesting the next job to allow OS memory reclamation
+                let sequential_mode = *self.worker_sequential_flag.lock().await;
+                if sequential_mode {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+                }
             }
         }
     }
