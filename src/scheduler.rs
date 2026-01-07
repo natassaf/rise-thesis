@@ -27,6 +27,8 @@ pub struct SchedulerEngine {
     component_cache: Arc<crate::wasm_loaders::ComponentCache>, // Shared component cache
     pin_cores: bool,
     worker_requests: Arc<Mutex<HashSet<usize>>>, // Track which workers have sent job requests
+    workers_with_notfound: Arc<Mutex<HashSet<usize>>>, // Track which workers received NotFound (to determine when to move to reschedule)
+    reschedule_move_flag: Arc<Mutex<bool>>, // Flag set to true when 2 workers received NotFound, triggers reschedule on next NotFound
     sequential_run_flag: Arc<Mutex<bool>>, // when true run all remaining jobs on one worker
     active_workers: Arc<Mutex<Vec<usize>>>, // Track which workers are active
     worker_thread_handles: Arc<Mutex<Vec<Option<std::thread::JoinHandle<()>>>>>, // Store worker thread handles to kill them when needed
@@ -83,6 +85,8 @@ impl SchedulerEngine {
             component_cache: component_cache.clone(),
             pin_cores,
             worker_requests: Arc::new(Mutex::new(HashSet::new())),
+            workers_with_notfound: Arc::new(Mutex::new(HashSet::new())),
+            reschedule_move_flag: Arc::new(Mutex::new(false)),
             sequential_run_flag: Arc::new(Mutex::new(false)) ,
             active_workers: Arc::new(Mutex::new(Vec::new())),
             worker_thread_handles: Arc::new(Mutex::new(Vec::new())),
@@ -198,6 +202,60 @@ impl SchedulerEngine {
             }
         };
         Ok(task_status)
+    }
+
+    /// Clear NotFound tracking for a worker when they receive a job
+    /// This removes the worker from tracking and resets the flag if count drops below 3
+    async fn clear_notfound_tracking_for_worker(&self, worker_id: usize) {
+        let mut notfound_workers = self.workers_with_notfound.lock().await;
+        notfound_workers.remove(&worker_id);
+        if notfound_workers.len() < 3 {
+            let mut flag = self.reschedule_move_flag.lock().await;
+            *flag = false;
+        }
+    }
+
+    /// Handle NotFound tracking for a worker and determine if we should move a job to reschedule
+    /// Returns true if a job should be moved to reschedule (3 workers have NotFound)
+    async fn handle_notfound_and_maybe_reschedule(&self, worker_id: usize) -> bool {
+        let should_move = {
+            let mut notfound_workers = self.workers_with_notfound.lock().await;
+            notfound_workers.insert(worker_id);
+            let count = notfound_workers.len();
+            
+            // If 3 workers have NotFound, set flag for next time
+            if count >= 3 {
+                let mut flag = self.reschedule_move_flag.lock().await;
+                *flag = true;
+            }
+            drop(notfound_workers);
+            
+            // Check if flag is set (meaning 3 workers already had NotFound)
+            let flag = self.reschedule_move_flag.lock().await;
+            *flag
+        };
+        
+        if should_move {
+            // Three workers have NotFound, move a job to reschedule
+            self.submitted_jobs.move_next_job_to_reschedule().await;
+            // Clear the tracking and reset flag
+            let mut notfound_workers = self.workers_with_notfound.lock().await;
+            notfound_workers.clear();
+            drop(notfound_workers);
+            let mut flag = self.reschedule_move_flag.lock().await;
+            *flag = false;
+        }
+        
+        should_move
+    }
+
+    /// Clear all NotFound tracking (used when resetting for new batch)
+    async fn clear_notfound_tracking(&self) {
+        let mut notfound_workers = self.workers_with_notfound.lock().await;
+        notfound_workers.clear();
+        drop(notfound_workers);
+        let mut flag = self.reschedule_move_flag.lock().await;
+        *flag = false;
     }
 
     pub async fn  find_compatible_job(&self, msg: &ToSchedulerMessage)->Option<Job>{
@@ -459,6 +517,9 @@ impl SchedulerEngine {
                 reschedule.remove(&job2.id);
                 drop(reschedule);
                 
+                // Clear NotFound tracking since this worker got jobs
+                self.clear_notfound_tracking_for_worker(from_worker_message.worker_id).await;
+                
                 // Send both jobs as separate messages
                 let response_message1 = self.encode_response(Some(job1), &from_worker_message).await;
                 let response_message2 = self.encode_response(Some(job2), &from_worker_message).await;
@@ -479,10 +540,13 @@ impl SchedulerEngine {
                     let mut reschedule = self.submitted_jobs.reschedule_job_ids.lock().await;
                     reschedule.remove(&job_id);
                     drop(reschedule);
+                    
+                    // Clear NotFound tracking since this worker got a job
+                    self.clear_notfound_tracking_for_worker(from_worker_message.worker_id).await;
                 }
                 else {
-                    // No job found - move next job that is not in pending to reschedule
-                    self.submitted_jobs.move_next_job_to_reschedule().await;
+                    // No job found - track this worker and check if we should move to reschedule
+                    self.handle_notfound_and_maybe_reschedule(from_worker_message.worker_id).await;
                 }
                 
                 // Send single job response (or NotFound)
@@ -503,10 +567,13 @@ impl SchedulerEngine {
                 let mut reschedule = self.submitted_jobs.reschedule_job_ids.lock().await;
                 reschedule.remove(&job_id);
                 drop(reschedule);
+                
+                // Clear NotFound tracking since this worker got a job
+                self.clear_notfound_tracking_for_worker(from_worker_message.worker_id).await;
             }
             else {
-                // No job found - move next job that is not in pending to reschedule
-                self.submitted_jobs.move_next_job_to_reschedule().await;
+                // No job found - track this worker and check if we should move to reschedule
+                self.handle_notfound_and_maybe_reschedule(from_worker_message.worker_id).await;
             }
             
             // Always send a response to the worker (either Found or NotFound)
@@ -626,6 +693,9 @@ impl SchedulerEngine {
         worker_requests.clear();
         drop(worker_requests);
         
+        // Reset NotFound tracking and reschedule flag
+        self.clear_notfound_tracking().await;
+        
         // Reset SubmittedJobs state
         self.submitted_jobs.reset_submitted_jobs().await;
 
@@ -724,7 +794,7 @@ impl SchedulerEngine {
         }
         
         // Wait a bit for workers to process shutdown
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
         
         // Now kill the worker threads completely by detaching them
         // We detach instead of joining because workers might be stuck in async operations (like notified().await)
@@ -749,7 +819,7 @@ impl SchedulerEngine {
         drop(w);
 
         // Wait for workers to fully shut down
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         
         // Trigger kernel memory reclamation by temporarily setting memory.high
         // This forces the kernel to reclaim "ghost memory" from killed workers
@@ -766,7 +836,7 @@ impl SchedulerEngine {
         }
         
         // Additional wait to allow kernel to finish reclamation
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Set worker 0's num_concurrent_tasks to 1 for sequential execution
         if let Some(worker_0) = self.workers.get(0) {
@@ -788,7 +858,7 @@ impl SchedulerEngine {
                      before_clear, after_clear, after_clear.saturating_sub(before_clear));
             
             // Final wait to allow OS to stabilize memory state
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         self.move_pending_back_to_reschedule().await;

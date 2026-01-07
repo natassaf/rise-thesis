@@ -125,8 +125,9 @@ pub async fn trigger_memory_reclamation() -> bool {
         return false;
     }
     
-    // Wait for kernel to process the reclamation (use async sleep to avoid blocking)
-    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+    // // Wait for kernel to process the reclamation (use async sleep to avoid blocking)
+    // // Reduced wait time - kernel reclamation happens quickly
+    // tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     
     // Restore original memory.high (or "max" if it wasn't set) immediately
     // Don't wait too long with memory.high set low to avoid throttling
@@ -136,8 +137,8 @@ pub async fn trigger_memory_reclamation() -> bool {
     };
     let _ = fs::write(&memory_high_path, restore_value);
     
-    // Additional wait to allow reclamation to complete (after restoring)
-    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+    // Reduced wait - reclamation continues asynchronously after restore
+    // tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     
     true
 }

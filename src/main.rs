@@ -127,7 +127,7 @@ async fn main() -> std::io::Result<()> {
 
             // Abort the scheduler task
             scheduler_handle.abort();
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
             // Exit the process: 0 is a success code sent to the OS for clean shutdown
             std::process::exit(0);

@@ -229,7 +229,7 @@ impl Worker {
                     "Worker {}: Insufficient memory for task {}. Required: {} KB, Available: {} KB (sequential_mode: {})",
                     self.worker_id, task_id, required_mem, current_memory, sequential_mode
                 );
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 // Send failure status and return early
                 self.send_task_status(task_id.clone(), Status::Failed).await;
                 return Status::Failed;
@@ -310,13 +310,12 @@ impl Worker {
         // Force memory reclamation by allocating and dropping large vectors
         // This helps the Rust allocator return memory to the OS, especially important
         // after many concurrent executions (Improvement1) where more memory may be retained
-        for _ in 0..3 {
-            let mut large_vec: Vec<u8> = Vec::with_capacity(10 * 1024 * 1024); // 10MB
-            large_vec.resize(10 * 1024 * 1024, 0);
-            drop(large_vec);
-            // Small delay to allow OS to reclaim memory
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        // Reduced to 1 iteration and shorter sleep for faster cleanup
+        let mut large_vec: Vec<u8> = Vec::with_capacity(10 * 1024 * 1024); // 10MB
+        large_vec.resize(10 * 1024 * 1024, 0);
+        drop(large_vec);
+        // Reduced delay - OS can reclaim memory asynchronously
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     /// Send a job request to scheduler with parameters worker_id, job_type, memory_capacity
@@ -578,18 +577,18 @@ impl Worker {
                 request_flag = false;
                 // If we received NotFound (no tasks), wait 100ms before next iteration
                 // This prevents busy-waiting when no jobs are available
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 continue;
             }
             else{
                 self.process_task(&mut tasks_to_process).await;
                 
-                // In sequential mode, wait a bit after processing tasks (and cleaning memory)
-                // before requesting the next job to allow OS memory reclamation
-                let sequential_mode = *self.worker_sequential_flag.lock().await;
-                if sequential_mode {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-                }
+                // // In sequential mode, wait a bit after processing tasks (and cleaning memory)
+                // // before requesting the next job to allow OS memory reclamation
+                // let sequential_mode = *self.worker_sequential_flag.lock().await;
+                // if sequential_mode {
+                //     tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                // }
             }
         }
     }
