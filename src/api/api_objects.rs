@@ -1,7 +1,7 @@
 use crate::optimized_scheduling_preprocessing::features_extractor::TaskBoundType;
 use crate::memory_monitoring::get_available_memory_kb;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::{HashSet, HashMap}, sync::Arc};
 use tokio::sync::Mutex;
 
 
@@ -65,12 +65,13 @@ impl From<WasmJobRequest> for Job {
 struct MemoryBucket {
     min_memory: usize,
     max_memory: usize,
-    job_indices: Vec<usize>, // Indices into the jobs vector (references, not clones)
+    job_ids: Vec<String>, // Job IDs (not indices, so they don't become stale)
 }
 
 #[derive(Debug, Clone)]
 pub struct SubmittedJobs {
-    pub jobs: Arc<Mutex<Vec<Job>>>,
+    pub jobs: Arc<Mutex<Vec<String>>>, // Job IDs vector
+    job_map: Arc<Mutex<HashMap<String, Job>>>, // HashMap mapping job IDs to Job objects
     pub num_jobs: Arc<Mutex<usize>>,
     pub io_bound_task_ids: Arc<Mutex<std::collections::HashSet<String>>>, // I/O-bound task IDs set
     pub cpu_bound_task_ids: Arc<Mutex<std::collections::HashSet<String>>>, // CPU-bound task IDs set
@@ -86,10 +87,12 @@ pub struct SubmittedJobs {
 impl SubmittedJobs {
     pub fn new() -> Self {
         let tasks = Arc::new(Mutex::new(vec![]));
+        let job_map = Arc::new(Mutex::new(HashMap::new()));
         let io_bound_set = Arc::new(Mutex::new(std::collections::HashSet::new()));
         let cpu_bound_set = Arc::new(Mutex::new(std::collections::HashSet::new()));
         Self {
             jobs: tasks,
+            job_map,
             num_jobs: Arc::new(Mutex::new(0)),
             io_bound_task_ids: io_bound_set,
             cpu_bound_task_ids: cpu_bound_set,
@@ -101,6 +104,46 @@ impl SubmittedJobs {
             io_memory_buckets: Arc::new(Mutex::new(None)),
             cpu_memory_buckets: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Get a job from the HashMap by its ID
+    pub async fn get_job_by_id(&self, job_id: &str) -> Option<Job> {
+        let job_map = self.job_map.lock().await;
+        job_map.get(job_id).cloned()
+    }
+
+    /// Update a job's properties in the HashMap
+    pub async fn update_job<F>(&self, job_id: &str, updater: F) -> bool
+    where
+        F: FnOnce(&mut Job),
+    {
+        let mut job_map = self.job_map.lock().await;
+        if let Some(job) = job_map.get_mut(job_id) {
+            updater(job);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Sort the jobs vector based on a comparison function that uses job data from HashMap
+    pub async fn sort_jobs<F>(&self, compare: F)
+    where
+        F: Fn(&Job, &Job) -> std::cmp::Ordering,
+    {
+        let mut job_ids = self.jobs.lock().await;
+        let job_map = self.job_map.lock().await;
+        
+        job_ids.sort_by(|id_a, id_b| {
+            let job_a = job_map.get(id_a);
+            let job_b = job_map.get(id_b);
+            match (job_a, job_b) {
+                (Some(a), Some(b)) => compare(a, b),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        });
     }
 
     pub async fn add_to_succesfull(&self, job_id:&str){
@@ -155,9 +198,17 @@ impl SubmittedJobs {
     }
 
     pub async fn remove_job(&self, job_id: String) {
+        // Remove from jobs vector (which now contains IDs)
         let mut jobs = self.jobs.lock().await;
-        jobs.retain(|job| job.id != job_id);
-        drop(jobs); // Release the lock before acquiring the next one
+        jobs.retain(|id| id != &job_id);
+        drop(jobs);
+        
+        // Remove from job_map
+        let mut job_map = self.job_map.lock().await;
+        job_map.remove(&job_id);
+        drop(job_map);
+        
+        // Remove from pending
         let mut pending = self.pending_job_ids.lock().await;
         pending.remove(&job_id);
     }
@@ -177,7 +228,7 @@ impl SubmittedJobs {
         // First, collect all job IDs while holding only the jobs lock
         let job_ids: Vec<String> = {
             let jobs = self.jobs.lock().await;
-            jobs.iter().map(|job| job.id.clone()).collect()
+            jobs.clone() // jobs is now Vec<String>, so we can clone it
         };
         
         // Now check each job ID against the other sets, acquiring locks only when needed
@@ -235,7 +286,7 @@ impl SubmittedJobs {
         }
         
         // Check if all job IDs are in the reschedule set
-        let all_in_reschedule = jobs.iter().all(|job| reschedule.contains(&job.id));
+        let all_in_reschedule = jobs.iter().all(|job_id| reschedule.contains(job_id));
         
         all_in_reschedule
     }
@@ -246,7 +297,11 @@ impl SubmittedJobs {
     }
 
     pub async fn get_jobs(&self) -> Vec<Job> {
-        self.jobs.lock().await.to_vec()
+        let job_ids = self.jobs.lock().await;
+        let job_map = self.job_map.lock().await;
+        job_ids.iter()
+            .filter_map(|id| job_map.get(id).cloned())
+            .collect()
     }
 
     // Gets the next job from the queue. The job will be removed when a success message is received
@@ -256,8 +311,9 @@ impl SubmittedJobs {
         if jobs.is_empty() {
             None
         } else {
-            let job = jobs[0].clone();
-            Some(job)
+            let job_id = jobs[0].clone();
+            drop(jobs);
+            self.get_job_by_id(&job_id).await
         }
     }
 
@@ -266,16 +322,14 @@ impl SubmittedJobs {
     /// The job will be removed when a success message is received
     pub async fn get_next_io_bounded_job(&self, memory_capacity: usize, sequential_run_flag:bool) -> Option<Job> {
         // Try using IO-bound memory buckets if available
-        let io_buckets_opt = {
-            let io_buckets = self.io_memory_buckets.lock().await;
-            io_buckets.as_ref().cloned()
-        };
+        // OPTIMIZATION: Get reference instead of cloning to avoid expensive copy
+        let io_buckets_guard = self.io_memory_buckets.lock().await;
         
-        if let Some(io_buckets) = io_buckets_opt {
+        if let Some(io_buckets) = io_buckets_guard.as_ref() {
             // Search buckets from largest to smallest
             for bucket in io_buckets.iter().rev() {
                 // Skip empty buckets
-                if bucket.job_indices.is_empty() {
+                if bucket.job_ids.is_empty() {
                     continue;
                 }
                 
@@ -285,86 +339,86 @@ impl SubmittedJobs {
                     continue;
                 }
                 
-                // Get job references and check each job in this bucket
-                let jobs = self.jobs.lock().await;
-                let io_bound_ids = self.io_bound_task_ids.lock().await;
+                // Lock all data structures ONCE for the entire bucket iteration
+                let job_map = self.job_map.lock().await;
+                let pending = self.pending_job_ids.lock().await;
+                let failed = self.failed_job_ids.lock().await;
+                let reschedule = if !sequential_run_flag {
+                    Some(self.reschedule_job_ids.lock().await)
+                } else {
+                    None
+                };
                 
-                for &job_idx in &bucket.job_indices {
-                    if job_idx >= jobs.len() {
-                        continue;
+                // Check each job ID in this bucket
+                for job_id in &bucket.job_ids {
+                    // OPTIMIZATION: Check cheap conditions FIRST (HashSet lookups)
+                    // before doing expensive HashMap lookup
+                    if pending.contains(job_id) {
+                        continue; // Skip pending jobs immediately
                     }
                     
-                    let job = &jobs[job_idx];
-                    
-                    // Check if job is IO-bound
-                    if !io_bound_ids.contains(&job.id) {
-                        continue;
+                    if failed.contains(job_id) {
+                        continue; // Skip failed jobs immediately
                     }
                     
-                    // Check if job is in pending
-                    let in_pending = {
-                        let pending = self.pending_job_ids.lock().await;
-                        pending.contains(&job.id)
-                    };
-                    if in_pending {
-                        continue;
-                    }
-                    
-                    // Check if job has failed
-                    let in_failed = {
-                        let failed = self.failed_job_ids.lock().await;
-                        failed.contains(&job.id)
-                    };
-                    if in_failed {
-                        continue;
-                    }
-                    
-                    // Check if job is in reschedule
                     if !sequential_run_flag {
-                        let in_reschedule = {
-                            let reschedule = self.reschedule_job_ids.lock().await;
-                            reschedule.contains(&job.id)
-                        };
-                        if in_reschedule {
-                            continue;
+                        if let Some(ref reschedule_guard) = reschedule {
+                            if reschedule_guard.contains(job_id) {
+                                continue; // Skip rescheduled jobs immediately
+                            }
                         }
                     }
                     
-                    // Check memory capacity
-                    let job_memory = if sequential_run_flag {
-                        0
-                    } else {
-                        job.memory_prediction.unwrap_or(0.0) as usize
+                    // Only do expensive HashMap lookup if job passed all cheap checks
+                    // OPTIMIZATION: Check memory from reference before cloning
+                    let job_memory = match job_map.get(job_id) {
+                        Some(job) => {
+                            if sequential_run_flag {
+                                0
+                            } else {
+                                job.memory_prediction.unwrap_or(0.0) as usize
+                            }
+                        },
+                        None => continue, // Job was removed from HashMap
                     };
                     
+                    // Only clone job if it fits in memory capacity
                     if job_memory <= memory_capacity {
-                        return Some(job.clone());
+                        let job = job_map.get(job_id).unwrap().clone(); // Safe unwrap - we just checked it exists
+                        // Drop all locks before returning
+                        drop(job_map);
+                        drop(pending);
+                        drop(failed);
+                        drop(reschedule);
+                        return Some(job); // EARLY RETURN - found valid job!
                     }
                 }
+                // Locks are automatically dropped here when going to next bucket
                 // If we get here, no valid job found in this bucket, try next bucket
             }
             return None;
         }
         
         // Fallback to linear search if no buckets
-        let (job_data, io_bound_task_ids): (Vec<(usize, String, Option<f64>)>, HashSet<String>) = {
+        let (job_ids, io_bound_task_ids): (Vec<String>, HashSet<String>) = {
             let jobs_guard = self.jobs.lock().await;
             let io_bound_guard = self.io_bound_task_ids.lock().await;
-            let job_data: Vec<(usize, String, Option<f64>)> = jobs_guard.iter()
-                .enumerate()
-                .map(|(idx, job)| (idx, job.id.clone(), job.memory_prediction))
-                .collect();
-            (job_data, io_bound_guard.clone())
+            (jobs_guard.clone(), io_bound_guard.clone())
         };
         
-        for (idx, task_id, memory_pred) in &job_data {
-            if !io_bound_task_ids.contains(task_id) {
+        for job_id in &job_ids {
+            if !io_bound_task_ids.contains(job_id) {
                 continue;
             }
             
+            let job = match self.get_job_by_id(job_id).await {
+                Some(job) => job,
+                None => continue,
+            };
+            
             let in_pending = {
                 let pending = self.pending_job_ids.lock().await;
-                pending.contains(task_id)
+                pending.contains(job_id)
             };
             if in_pending {
                 continue;
@@ -372,7 +426,7 @@ impl SubmittedJobs {
             
             let in_failed = {
                 let failed = self.failed_job_ids.lock().await;
-                failed.contains(task_id)
+                failed.contains(job_id)
             };
             if in_failed {
                 continue;
@@ -381,7 +435,7 @@ impl SubmittedJobs {
             if !sequential_run_flag {
                 let in_reschedule = {
                     let reschedule = self.reschedule_job_ids.lock().await;
-                    reschedule.contains(task_id)
+                    reschedule.contains(job_id)
                 };
                 if in_reschedule {
                     continue;
@@ -391,12 +445,11 @@ impl SubmittedJobs {
             let job_memory = if sequential_run_flag {
                 0
             } else {
-                memory_pred.unwrap_or(0.0) as usize
+                job.memory_prediction.unwrap_or(0.0) as usize
             };
             
             if job_memory <= memory_capacity {
-                let jobs_guard = self.jobs.lock().await;
-                return Some(jobs_guard[*idx].clone());
+                return Some(job);
             }
         }
         None
@@ -407,16 +460,14 @@ impl SubmittedJobs {
     /// The job will be removed when a success message is received
     pub async fn get_next_cpu_bounded_job(&self, memory_capacity: usize, sequential_run_flag:bool) -> Option<Job> {
         // Try using CPU-bound memory buckets if available
-        let cpu_buckets_opt = {
-            let cpu_buckets = self.cpu_memory_buckets.lock().await;
-            cpu_buckets.as_ref().cloned()
-        };
+        // OPTIMIZATION: Get reference instead of cloning to avoid expensive copy
+        let cpu_buckets_guard = self.cpu_memory_buckets.lock().await;
         
-        if let Some(cpu_buckets) = cpu_buckets_opt {
+        if let Some(cpu_buckets) = cpu_buckets_guard.as_ref() {
             // Search buckets from largest to smallest
             for bucket in cpu_buckets.iter().rev() {
                 // Skip empty buckets
-                if bucket.job_indices.is_empty() {
+                if bucket.job_ids.is_empty() {
                     continue;
                 }
                 
@@ -426,86 +477,86 @@ impl SubmittedJobs {
                     continue;
                 }
                 
-                // Get job references and check each job in this bucket
-                let jobs = self.jobs.lock().await;
-                let cpu_bound_ids = self.cpu_bound_task_ids.lock().await;
+                // Lock all data structures ONCE for the entire bucket iteration
+                let job_map = self.job_map.lock().await;
+                let pending = self.pending_job_ids.lock().await;
+                let failed = self.failed_job_ids.lock().await;
+                let reschedule = if !sequential_run_flag {
+                    Some(self.reschedule_job_ids.lock().await)
+                } else {
+                    None
+                };
                 
-                for &job_idx in &bucket.job_indices {
-                    if job_idx >= jobs.len() {
-                        continue;
+                // Check each job ID in this bucket
+                for job_id in &bucket.job_ids {
+                    // OPTIMIZATION: Check cheap conditions FIRST (HashSet lookups)
+                    // before doing expensive HashMap lookup
+                    if pending.contains(job_id) {
+                        continue; // Skip pending jobs immediately
                     }
                     
-                    let job = &jobs[job_idx];
-                    
-                    // Check if job is CPU-bound
-                    if !cpu_bound_ids.contains(&job.id) {
-                        continue;
+                    if failed.contains(job_id) {
+                        continue; // Skip failed jobs immediately
                     }
                     
-                    // Check if job is in pending
-                    let in_pending = {
-                        let pending = self.pending_job_ids.lock().await;
-                        pending.contains(&job.id)
-                    };
-                    if in_pending {
-                        continue;
-                    }
-                    
-                    // Check if job has failed
-                    let in_failed = {
-                        let failed = self.failed_job_ids.lock().await;
-                        failed.contains(&job.id)
-                    };
-                    if in_failed {
-                        continue;
-                    }
-                    
-                    // Check if job is in reschedule
                     if !sequential_run_flag {
-                        let in_reschedule = {
-                            let reschedule = self.reschedule_job_ids.lock().await;
-                            reschedule.contains(&job.id)
-                        };
-                        if in_reschedule {
-                            continue;
+                        if let Some(ref reschedule_guard) = reschedule {
+                            if reschedule_guard.contains(job_id) {
+                                continue; // Skip rescheduled jobs immediately
+                            }
                         }
                     }
                     
-                    // Check memory capacity
-                    let job_memory = if sequential_run_flag {
-                        0
-                    } else {
-                        job.memory_prediction.unwrap_or(0.0) as usize
+                    // Only do expensive HashMap lookup if job passed all cheap checks
+                    // OPTIMIZATION: Check memory from reference before cloning
+                    let job_memory = match job_map.get(job_id) {
+                        Some(job) => {
+                            if sequential_run_flag {
+                                0
+                            } else {
+                                job.memory_prediction.unwrap_or(0.0) as usize
+                            }
+                        },
+                        None => continue, // Job was removed from HashMap
                     };
                     
+                    // Only clone job if it fits in memory capacity
                     if job_memory <= memory_capacity {
-                        return Some(job.clone());
+                        let job = job_map.get(job_id).unwrap().clone(); // Safe unwrap - we just checked it exists
+                        // Drop all locks before returning
+                        drop(job_map);
+                        drop(pending);
+                        drop(failed);
+                        drop(reschedule);
+                        return Some(job); // EARLY RETURN - found valid job!
                     }
                 }
+                // Locks are automatically dropped here when going to next bucket
                 // If we get here, no valid job found in this bucket, try next bucket
             }
             return None;
         }
         
         // Fallback to linear search if no buckets
-        let (job_data, cpu_bound_task_ids): (Vec<(usize, String, Option<f64>)>, HashSet<String>) = {
+        let (job_ids, cpu_bound_task_ids): (Vec<String>, HashSet<String>) = {
             let jobs_guard = self.jobs.lock().await;
             let cpu_bound_guard = self.cpu_bound_task_ids.lock().await;
-            let job_data: Vec<(usize, String, Option<f64>)> = jobs_guard.iter()
-                .enumerate()
-                .map(|(idx, job)| (idx, job.id.clone(), job.memory_prediction))
-                .collect();
-            (job_data, cpu_bound_guard.clone())
+            (jobs_guard.clone(), cpu_bound_guard.clone())
         };
         
-        for (idx, task_id, memory_pred) in &job_data {
-            if !cpu_bound_task_ids.contains(task_id) {
+        for job_id in &job_ids {
+            if !cpu_bound_task_ids.contains(job_id) {
                 continue;
             }
             
+            let job = match self.get_job_by_id(job_id).await {
+                Some(job) => job,
+                None => continue,
+            };
+            
             let in_pending = {
                 let pending = self.pending_job_ids.lock().await;
-                pending.contains(task_id)
+                pending.contains(job_id)
             };
             if in_pending {
                 continue;
@@ -513,7 +564,7 @@ impl SubmittedJobs {
             
             let in_failed = {
                 let failed = self.failed_job_ids.lock().await;
-                failed.contains(task_id)
+                failed.contains(job_id)
             };
             if in_failed {
                 continue;
@@ -522,7 +573,7 @@ impl SubmittedJobs {
             if !sequential_run_flag {
                 let in_reschedule = {
                     let reschedule = self.reschedule_job_ids.lock().await;
-                    reschedule.contains(task_id)
+                    reschedule.contains(job_id)
                 };
                 if in_reschedule {
                     continue;
@@ -532,12 +583,11 @@ impl SubmittedJobs {
             let job_memory = if sequential_run_flag {
                 0
             } else {
-                memory_pred.unwrap_or(0.0) as usize
+                job.memory_prediction.unwrap_or(0.0) as usize
             };
             
             if job_memory <= memory_capacity {
-                let jobs_guard = self.jobs.lock().await;
-                return Some(jobs_guard[*idx].clone());
+                return Some(job);
             }
         }
         None
@@ -547,16 +597,14 @@ impl SubmittedJobs {
     /// The job will be removed when a success message is received
     pub async fn get_next_job(&self, memory_capacity: usize, sequential_run_flag:bool) -> Option<Job> {
         // Try using memory buckets if available
-        let buckets_opt = {
-            let buckets = self.memory_buckets.lock().await;
-            buckets.as_ref().cloned()
-        };
+        // OPTIMIZATION: Get reference instead of cloning to avoid expensive copy
+        let buckets_guard = self.memory_buckets.lock().await;
         
-        if let Some(buckets) = buckets_opt {
+        if let Some(buckets) = buckets_guard.as_ref() {
             // Search buckets from largest to smallest
             for bucket in buckets.iter().rev() {
                 // Skip empty buckets
-                if bucket.job_indices.is_empty() {
+                if bucket.job_ids.is_empty() {
                     continue;
                 }
                 
@@ -566,71 +614,78 @@ impl SubmittedJobs {
                     continue;
                 }
                 
-                // Get job references and check each job in this bucket
-                let jobs = self.jobs.lock().await;
+                // Lock all data structures ONCE for the entire bucket iteration
+                let job_map = self.job_map.lock().await;
+                let pending = self.pending_job_ids.lock().await;
+                let failed = self.failed_job_ids.lock().await;
+                let reschedule = if !sequential_run_flag {
+                    Some(self.reschedule_job_ids.lock().await)
+                } else {
+                    None
+                };
                 
-                for &job_idx in &bucket.job_indices {
-                    if job_idx >= jobs.len() {
-                        continue;
+                // Check each job ID in this bucket
+                for job_id in &bucket.job_ids {
+                    // OPTIMIZATION: Check cheap conditions FIRST (HashSet lookups)
+                    // before doing expensive HashMap lookup
+                    if pending.contains(job_id) {
+                        continue; // Skip pending jobs immediately
                     }
                     
-                    let job = &jobs[job_idx];
-                    
-                    // Check if job is in pending
-                    let in_pending = {
-                        let pending = self.pending_job_ids.lock().await;
-                        pending.contains(&job.id)
-                    };
-                    if in_pending {
-                        continue;
+                    if failed.contains(job_id) {
+                        continue; // Skip failed jobs immediately
                     }
                     
-                    // Check if job has failed
-                    let in_failed = {
-                        let failed = self.failed_job_ids.lock().await;
-                        failed.contains(&job.id)
-                    };
-                    if in_failed {
-                        continue;
-                    }
-                    
-                    // Check if job is in reschedule
                     if !sequential_run_flag {
-                        let in_reschedule = {
-                            let reschedule = self.reschedule_job_ids.lock().await;
-                            reschedule.contains(&job.id)
-                        };
-                        if in_reschedule {
-                            continue;
+                        if let Some(ref reschedule_guard) = reschedule {
+                            if reschedule_guard.contains(job_id) {
+                                continue; // Skip rescheduled jobs immediately
+                            }
                         }
                     }
                     
-                    // Check memory capacity
-                    let job_memory = if sequential_run_flag {
-                        0
-                    } else {
-                        job.memory_prediction.unwrap_or(0.0) as usize
+                    // Only do expensive HashMap lookup if job passed all cheap checks
+                    // OPTIMIZATION: Check memory from reference before cloning
+                    let job_memory = match job_map.get(job_id) {
+                        Some(job) => {
+                            if sequential_run_flag {
+                                0
+                            } else {
+                                job.memory_prediction.unwrap_or(0.0) as usize
+                            }
+                        },
+                        None => continue, // Job was removed from HashMap
                     };
                     
+                    // Only clone job if it fits in memory capacity
                     if job_memory <= memory_capacity {
-                        return Some(job.clone());
+                        let job = job_map.get(job_id).unwrap().clone(); // Safe unwrap - we just checked it exists
+                        // Drop all locks before returning
+                        drop(job_map);
+                        drop(pending);
+                        drop(failed);
+                        drop(reschedule);
+                        return Some(job); // EARLY RETURN - found valid job!
                     }
                 }
+                // Locks are automatically dropped here when going to next bucket
                 // If we get here, no valid job found in this bucket, try next bucket
             }
             return None;
         }
         
         // Fallback to linear search if no buckets
-        let job_data: Vec<(usize, String, Option<f64>)> = {
+        let job_ids: Vec<String> = {
             let jobs_guard = self.jobs.lock().await;
-            jobs_guard.iter()
-                .enumerate()
-                .map(|(idx, job)| (idx, job.id.clone(), job.memory_prediction))
-                .collect()
+            jobs_guard.clone()
         };
         
-        for (idx, job_id, memory_pred) in &job_data {
+        for job_id in &job_ids {
+            let job = match self.get_job_by_id(job_id).await {
+                Some(job) => job,
+                None => continue,
+            };
+            
             let in_pending = {
                 let pending = self.pending_job_ids.lock().await;
                 pending.contains(job_id)
@@ -660,12 +715,11 @@ impl SubmittedJobs {
             let job_memory = if sequential_run_flag {
                 0
             } else {
-                memory_pred.unwrap_or(0.0) as usize
+                job.memory_prediction.unwrap_or(0.0) as usize
             };
 
             if job_memory <= memory_capacity {
-                let jobs_guard = self.jobs.lock().await;
-                return Some(jobs_guard[*idx].clone());
+                return Some(job);
             }
         }
         None
@@ -712,52 +766,52 @@ impl SubmittedJobs {
     pub async fn get_two_jobs(&self, memory_capacity: usize) -> Option<(Job, Job)> {
         println!("[get_two_jobs] Called with memory_capacity: {} KB", memory_capacity);
         
-        // Collect job data with their types
-        let (job_data, io_bound_task_ids, cpu_bound_task_ids): (
-            Vec<(usize, String, Option<f64>)>,
+        // Collect job IDs and their types
+        let (job_ids, io_bound_task_ids, cpu_bound_task_ids): (
+            Vec<String>,
             HashSet<String>,
             HashSet<String>
         ) = {
             let jobs_guard = self.jobs.lock().await;
             let io_bound_guard = self.io_bound_task_ids.lock().await;
             let cpu_bound_guard = self.cpu_bound_task_ids.lock().await;
-            let job_data: Vec<(usize, String, Option<f64>)> = jobs_guard.iter()
-                .enumerate()
-                .map(|(idx, job)| (idx, job.id.clone(), job.memory_prediction))
-                .collect();
-            (job_data, io_bound_guard.clone(), cpu_bound_guard.clone())
+            (jobs_guard.clone(), io_bound_guard.clone(), cpu_bound_guard.clone())
         };
 
-        println!("[get_two_jobs] Total jobs available: {}", job_data.len());
+        println!("[get_two_jobs] Total jobs available: {}", job_ids.len());
 
         // Find the first job (job1) - any job, we don't care if it's IO-bound, CPU-bound, or mixed
-        let mut job1_idx: Option<usize> = None;
+        let mut job1_id: Option<String> = None;
         let mut job1_memory: usize = 0;
         let mut job1_is_io_bound: bool = false;
         let mut job1_is_cpu_bound: bool = false;
-        let mut job1_id: String = String::new();
         
-        for (idx, task_id, memory_pred) in &job_data {
+        for task_id in &job_ids {
             // Check if job is eligible
             if !self.is_job_eligible(task_id).await {
                 continue;
             }
             
+            // Get job from HashMap
+            let job = match self.get_job_by_id(task_id).await {
+                Some(job) => job,
+                None => continue,
+            };
+            
             // Get memory requirement
-            let job_memory = Self::get_job_memory(memory_pred);
+            let job_memory = Self::get_job_memory(&job.memory_prediction);
             
             // Found first job - determine its type
-            job1_idx = Some(*idx);
+            job1_id = Some(task_id.clone());
             job1_memory = job_memory;
-            job1_id = task_id.clone();
             job1_is_io_bound = io_bound_task_ids.contains(task_id);
             job1_is_cpu_bound = cpu_bound_task_ids.contains(task_id);
             break;
         }
         
         // If no job found, return None
-        let job1_idx = match job1_idx {
-            Some(idx) => {
+        let job1_id = match job1_id {
+            Some(id) => {
                 let job1_type = if job1_is_io_bound {
                     "IO-bound"
                 } else if job1_is_cpu_bound {
@@ -766,8 +820,8 @@ impl SubmittedJobs {
                     "Mixed"
                 };
                 println!("[get_two_jobs] Found job1: id={}, type={}, memory={} KB", 
-                    job1_id, job1_type, job1_memory);
-                idx
+                    id, job1_type, job1_memory);
+                id
             },
             None => {
                 println!("[get_two_jobs] No eligible job1 found, returning None");
@@ -778,9 +832,9 @@ impl SubmittedJobs {
         println!("[get_two_jobs] Searching for job2 (different type than job1)");
         
         // Now find the first job of different type than job1 that fits with job1
-        for (idx, task_id, memory_pred) in &job_data {
+        for task_id in &job_ids {
             // Skip if it's the same job as job1
-            if *idx == job1_idx {
+            if task_id == &job1_id {
                 continue;
             }
             
@@ -811,8 +865,14 @@ impl SubmittedJobs {
                 continue;
             }
             
+            // Get job from HashMap
+            let job2 = match self.get_job_by_id(task_id).await {
+                Some(job) => job,
+                None => continue,
+            };
+            
             // Get memory requirement
-            let job2_memory = Self::get_job_memory(memory_pred);
+            let job2_memory = Self::get_job_memory(&job2.memory_prediction);
             
             let combined_memory = job1_memory + job2_memory;
             let job2_type = if job2_is_io_bound {
@@ -829,9 +889,10 @@ impl SubmittedJobs {
             // Check if combined memory fits
             if combined_memory <= memory_capacity {
                 // Found a pair! Return both jobs
-                let jobs_guard = self.jobs.lock().await;
-                let job1 = jobs_guard[job1_idx].clone();
-                let job2 = jobs_guard[*idx].clone();
+                let job1 = match self.get_job_by_id(&job1_id).await {
+                    Some(job) => job,
+                    None => return None, // Should not happen, but safety check
+                };
                 println!("[get_two_jobs] ✓ Found pair: job1={} ({} KB), job2={} ({} KB), total={} KB", 
                     job1.id, job1_memory, job2.id, job2_memory, combined_memory);
                 return Some((job1, job2));
@@ -846,8 +907,18 @@ impl SubmittedJobs {
     }
 
     pub async fn add_task(&self, task: Job) {
+        let job_id = task.id.clone();
+        
+        // Add to job_map
+        let mut job_map = self.job_map.lock().await;
+        job_map.insert(job_id.clone(), task);
+        drop(job_map);
+        
+        // Add job ID to jobs vector
         let mut guard = self.jobs.lock().await;
-        guard.push(task);
+        guard.push(job_id);
+        drop(guard);
+        
         let mut counter = self.num_jobs.lock().await;
         *counter += 1;
     }
@@ -858,8 +929,8 @@ impl SubmittedJobs {
     /// Returns None if no jobs have memory predictions
     /// This should be called after jobs are updated with memory predictions
     pub async fn build_memory_buckets(&self) {
-        let jobs = self.jobs.lock().await;
-        let num_jobs = jobs.len();
+        let job_ids = self.jobs.lock().await;
+        let num_jobs = job_ids.len();
         
         if num_jobs == 0 {
             let mut buckets = self.memory_buckets.lock().await;
@@ -867,26 +938,28 @@ impl SubmittedJobs {
             return;
         }
         
-        // Check if any jobs have memory predictions
-        let has_memory_predictions = jobs.iter().any(|job| job.memory_prediction.is_some());
-        if !has_memory_predictions {
+        // Collect jobs with their IDs, memory predictions, and execution times
+        let mut jobs_with_memory: Vec<(String, usize, f64)> = {
+            let job_map = self.job_map.lock().await;
+            job_ids.iter()
+                .filter_map(|job_id| {
+                    job_map.get(job_id).and_then(|job| {
+                        job.memory_prediction.map(|mem| {
+                            let time = job.execution_time_prediction.unwrap_or(0.0);
+                            (job_id.clone(), mem as usize, time)
+                        })
+                    })
+                })
+                .collect()
+        };
+        
+        drop(job_ids); // Release lock early
+        
+        if jobs_with_memory.is_empty() {
             let mut buckets = self.memory_buckets.lock().await;
             *buckets = None;
             return;
         }
-        
-        // Collect jobs with their indices, memory predictions, and execution times in one pass
-        let mut jobs_with_memory: Vec<(usize, usize, f64)> = jobs.iter()
-            .enumerate()
-            .filter_map(|(idx, job)| {
-                job.memory_prediction.map(|mem| {
-                    let time = job.execution_time_prediction.unwrap_or(0.0);
-                    (idx, mem as usize, time)
-                })
-            })
-            .collect();
-        
-        drop(jobs); // Release lock early
         
         // Sort by memory to create buckets
         jobs_with_memory.sort_by_key(|(_, mem, _)| *mem);
@@ -911,26 +984,26 @@ impl SubmittedJobs {
                 break;
             }
             
-            let mut bucket_data: Vec<(usize, f64)> = jobs_with_memory[start_idx..end_idx]
+            let mut bucket_data: Vec<(String, f64)> = jobs_with_memory[start_idx..end_idx]
                 .iter()
-                .map(|(idx, _, time)| (*idx, *time))
+                .map(|(job_id, _, time)| (job_id.clone(), *time))
                 .collect();
             
             if !bucket_data.is_empty() {
                 let min_memory = jobs_with_memory[start_idx].1;
                 let max_memory = jobs_with_memory[end_idx - 1].1;
                 
-                // Sort job indices within bucket by execution time (shortest first)
+                // Sort job IDs within bucket by execution time (shortest first)
                 bucket_data.sort_by(|(_, time_a), (_, time_b)| {
                     time_a.partial_cmp(time_b).unwrap_or(std::cmp::Ordering::Equal)
                 });
                 
-                let bucket_jobs: Vec<usize> = bucket_data.iter().map(|(idx, _)| *idx).collect();
+                let bucket_job_ids: Vec<String> = bucket_data.iter().map(|(job_id, _)| job_id.clone()).collect();
                 
                 buckets.push(MemoryBucket {
                     min_memory,
                     max_memory,
-                    job_indices: bucket_jobs,
+                    job_ids: bucket_job_ids,
                 });
             }
         }
@@ -940,7 +1013,7 @@ impl SubmittedJobs {
             println!("[Memory Buckets] Created {} buckets:", buckets.len());
             for (i, bucket) in buckets.iter().enumerate() {
                 println!("  Bucket {}: min_memory={} KB, max_memory={} KB, num_jobs={}", 
-                    i, bucket.min_memory, bucket.max_memory, bucket.job_indices.len());
+                    i, bucket.min_memory, bucket.max_memory, bucket.job_ids.len());
             }
         }
         
@@ -959,35 +1032,43 @@ impl SubmittedJobs {
 
     /// Build separate IO-bound and CPU-bound memory buckets
     async fn build_typed_memory_buckets(&self) {
-        let jobs = self.jobs.lock().await;
+        let job_ids = self.jobs.lock().await;
         let io_bound_ids = self.io_bound_task_ids.lock().await;
         let cpu_bound_ids = self.cpu_bound_task_ids.lock().await;
         
         // Collect IO-bound jobs with memory
-        let mut io_jobs_with_memory: Vec<(usize, usize)> = jobs.iter()
-            .enumerate()
-            .filter_map(|(idx, job)| {
-                if io_bound_ids.contains(&job.id) {
-                    job.memory_prediction.map(|mem| (idx, mem as usize))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut io_jobs_with_memory: Vec<(String, usize)> = {
+            let job_map = self.job_map.lock().await;
+            job_ids.iter()
+                .filter_map(|job_id| {
+                    if io_bound_ids.contains(job_id) {
+                        job_map.get(job_id).and_then(|job| {
+                            job.memory_prediction.map(|mem| (job_id.clone(), mem as usize))
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
         
         // Collect CPU-bound jobs with memory
-        let mut cpu_jobs_with_memory: Vec<(usize, usize)> = jobs.iter()
-            .enumerate()
-            .filter_map(|(idx, job)| {
-                if cpu_bound_ids.contains(&job.id) {
-                    job.memory_prediction.map(|mem| (idx, mem as usize))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut cpu_jobs_with_memory: Vec<(String, usize)> = {
+            let job_map = self.job_map.lock().await;
+            job_ids.iter()
+                .filter_map(|job_id| {
+                    if cpu_bound_ids.contains(job_id) {
+                        job_map.get(job_id).and_then(|job| {
+                            job.memory_prediction.map(|mem| (job_id.clone(), mem as usize))
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
         
-        drop(jobs);
+        drop(job_ids);
         drop(io_bound_ids);
         drop(cpu_bound_ids);
         
@@ -1010,21 +1091,17 @@ impl SubmittedJobs {
     }
 
     /// Helper to build buckets from sorted job list
-    async fn build_buckets_from_sorted(&self, sorted_jobs: &[(usize, usize)], jobs_per_bucket: usize) -> Vec<MemoryBucket> {
+    async fn build_buckets_from_sorted(&self, sorted_jobs: &[(String, usize)], jobs_per_bucket: usize) -> Vec<MemoryBucket> {
         if sorted_jobs.is_empty() {
             return Vec::new();
         }
         
         // Collect execution times while holding the lock once, create a HashMap for O(1) lookup
-        let job_times_map: std::collections::HashMap<usize, f64> = {
-            let jobs = self.jobs.lock().await;
+        let job_times_map: std::collections::HashMap<String, f64> = {
+            let job_map = self.job_map.lock().await;
             sorted_jobs.iter()
-                .filter_map(|(idx, _)| {
-                    if *idx < jobs.len() {
-                        Some((*idx, jobs[*idx].execution_time_prediction.unwrap_or(0.0)))
-                    } else {
-                        None
-                    }
+                .filter_map(|(job_id, _)| {
+                    job_map.get(job_id).map(|job| (job_id.clone(), job.execution_time_prediction.unwrap_or(0.0)))
                 })
                 .collect()
         };
@@ -1045,10 +1122,10 @@ impl SubmittedJobs {
                 break;
             }
             
-            let mut bucket_data: Vec<(usize, f64)> = sorted_jobs[start_idx..end_idx]
+            let mut bucket_data: Vec<(String, f64)> = sorted_jobs[start_idx..end_idx]
                 .iter()
-                .filter_map(|(idx, _)| {
-                    job_times_map.get(idx).map(|&time| (*idx, time))
+                .filter_map(|(job_id, _)| {
+                    job_times_map.get(job_id).map(|&time| (job_id.clone(), time))
                 })
                 .collect();
             
@@ -1056,17 +1133,17 @@ impl SubmittedJobs {
                 let min_memory = sorted_jobs[start_idx].1;
                 let max_memory = sorted_jobs[end_idx - 1].1;
                 
-                // Sort job indices within bucket by execution time (shortest first)
+                // Sort job IDs within bucket by execution time (shortest first)
                 bucket_data.sort_by(|(_, time_a), (_, time_b)| {
                     time_a.partial_cmp(time_b).unwrap_or(std::cmp::Ordering::Equal)
                 });
                 
-                let bucket_jobs: Vec<usize> = bucket_data.iter().map(|(idx, _)| *idx).collect();
+                let bucket_job_ids: Vec<String> = bucket_data.iter().map(|(job_id, _)| job_id.clone()).collect();
                 
                 buckets.push(MemoryBucket {
                     min_memory,
                     max_memory,
-                    job_indices: bucket_jobs,
+                    job_ids: bucket_job_ids,
                 });
             }
         }
@@ -1125,8 +1202,8 @@ impl SubmittedJobs {
         
         // Case 2: Jobs list is not empty - check if all jobs are in successful or failed sets
         // Check if all job IDs are in either successful or failed sets
-        let all_in_success_or_failed = jobs.iter().all(|job| {
-            successfull.contains(&job.id) || failed.contains(&job.id)
+        let all_in_success_or_failed = jobs.iter().all(|job_id| {
+            successfull.contains(job_id) || failed.contains(job_id)
         });
         
         all_in_success_or_failed
