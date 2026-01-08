@@ -862,7 +862,7 @@ impl SchedulerEngine {
                      before_clear, after_clear, after_clear.saturating_sub(before_clear));
             
             // Final wait to allow OS to stabilize memory state
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
         }
 
         self.move_pending_back_to_reschedule().await;

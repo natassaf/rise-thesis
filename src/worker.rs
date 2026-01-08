@@ -587,7 +587,7 @@ impl Worker {
                 // // before requesting the next job to allow OS memory reclamation
                 // let sequential_mode = *self.worker_sequential_flag.lock().await;
                 // if sequential_mode {
-                //     tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                    // tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                 // }
             }
         }
