@@ -28,7 +28,7 @@ pub struct SchedulerEngine {
     pin_cores: bool,
     worker_requests: Arc<Mutex<HashSet<usize>>>, // Track which workers have sent job requests
     workers_with_notfound: Arc<Mutex<HashSet<usize>>>, // Track which workers received NotFound (to determine when to move to reschedule)
-    reschedule_move_flag: Arc<Mutex<bool>>, // Flag set to true when 2 workers received NotFound, triggers reschedule on next NotFound
+    reschedule_move_flag: Arc<Mutex<bool>>, // Flag set to true when all workers received NotFound, triggers reschedule on next NotFound
     sequential_run_flag: Arc<Mutex<bool>>, // when true run all remaining jobs on one worker
     active_workers: Arc<Mutex<Vec<usize>>>, // Track which workers are active
     worker_thread_handles: Arc<Mutex<Vec<Option<std::thread::JoinHandle<()>>>>>, // Store worker thread handles to kill them when needed
@@ -205,38 +205,40 @@ impl SchedulerEngine {
     }
 
     /// Clear NotFound tracking for a worker when they receive a job
-    /// This removes the worker from tracking and resets the flag if count drops below 3
+    /// This removes the worker from tracking and resets the flag if count drops below num_workers
     async fn clear_notfound_tracking_for_worker(&self, worker_id: usize) {
         let mut notfound_workers = self.workers_with_notfound.lock().await;
         notfound_workers.remove(&worker_id);
-        if notfound_workers.len() < 3 {
+        let num_workers = self.workers.len();
+        if notfound_workers.len() < num_workers {
             let mut flag = self.reschedule_move_flag.lock().await;
             *flag = false;
         }
     }
 
     /// Handle NotFound tracking for a worker and determine if we should move a job to reschedule
-    /// Returns true if a job should be moved to reschedule (3 workers have NotFound)
+    /// Returns true if a job should be moved to reschedule (all workers have NotFound)
     async fn handle_notfound_and_maybe_reschedule(&self, worker_id: usize) -> bool {
+        let num_workers = self.workers.len();
         let should_move = {
             let mut notfound_workers = self.workers_with_notfound.lock().await;
             notfound_workers.insert(worker_id);
             let count = notfound_workers.len();
             
-            // If 3 workers have NotFound, set flag for next time
-            if count >= 3 {
+            // If all workers have NotFound, set flag for next time
+            if count >= num_workers {
                 let mut flag = self.reschedule_move_flag.lock().await;
                 *flag = true;
             }
             drop(notfound_workers);
             
-            // Check if flag is set (meaning 3 workers already had NotFound)
+            // Check if flag is set (meaning all workers already had NotFound)
             let flag = self.reschedule_move_flag.lock().await;
             *flag
         };
         
         if should_move {
-            // Three workers have NotFound, move a job to reschedule
+            // All workers have NotFound, move a job to reschedule
             self.submitted_jobs.move_next_job_to_reschedule().await;
             // Clear the tracking and reset flag
             let mut notfound_workers = self.workers_with_notfound.lock().await;
