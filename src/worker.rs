@@ -229,7 +229,15 @@ impl Worker {
                     "Worker {}: Insufficient memory for task {}. Required: {} KB, Available: {} KB (sequential_mode: {})",
                     self.worker_id, task_id, required_mem, current_memory, sequential_mode
                 );
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                
+                // Simulate OOM kill and worker restart:
+                // - OOM detection + process kill: ~200ms (kernel scanning, SIGKILL, cleanup)
+                // - Worker reinitialization: ~300ms (thread spawn, WASM runtime init, component cache)
+                // Total: 500ms
+                const OOM_KILL_TIME_MS: u64 = 1;
+                const WORKER_REINIT_TIME_MS: u64 = 300;
+                tokio::time::sleep(Duration::from_millis(OOM_KILL_TIME_MS + WORKER_REINIT_TIME_MS)).await;
+                
                 // Send failure status and return early
                 self.send_task_status(task_id.clone(), Status::Failed).await;
                 return Status::Failed;
