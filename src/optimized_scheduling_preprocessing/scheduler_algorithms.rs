@@ -497,21 +497,51 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm {
             println!("job_id_to_time_prediction: {:?}", job_id_to_time_prediction);
 
             // Update jobs with memory, time predictions, and task bound type (no parallel iterator needed)
-            let mut jobs = submitted_jobs.jobs.lock().await;
-            for job in jobs.iter_mut() {
-                if let Some(prediction) = job_id_to_memory_prediction.get(&job.id) {
-                    job.memory_prediction = Some(*prediction);
+            let mut cpu_bound_task_ids_temp: Vec<String> = Vec::new();
+            let mut io_bound_task_ids_temp: Vec<String> = Vec::new();
+            
+            {
+                let mut jobs = submitted_jobs.jobs.lock().await;
+                for job in jobs.iter_mut() {
+                    if let Some(prediction) = job_id_to_memory_prediction.get(&job.id) {
+                        job.memory_prediction = Some(*prediction);
+                    }
+                    if let Some(prediction) = job_id_to_time_prediction.get(&job.id) {
+                        job.execution_time_prediction = Some(*prediction);
+                    }
+                    if let Some(bound_type) = job_id_to_task_bound_type.get(&job.id) {
+                        job.task_bound_type = Some(*bound_type);
+                    }
+                    
+                    // Collect task IDs while we have the lock
+                    match job.task_bound_type {
+                        Some(TaskBoundType::CpuBound) => {
+                            cpu_bound_task_ids_temp.push(job.id.clone());
+                        }
+                        Some(TaskBoundType::IoBound) => {
+                            io_bound_task_ids_temp.push(job.id.clone());
+                        }
+                        _ => {
+                            cpu_bound_task_ids_temp.push(job.id.clone());
+                        }
+                    }
                 }
-                if let Some(prediction) = job_id_to_time_prediction.get(&job.id) {
-                    job.execution_time_prediction = Some(*prediction);
-                }
-                if let Some(bound_type) = job_id_to_task_bound_type.get(&job.id) {
-                    job.task_bound_type = Some(*bound_type);
-                }
-            }
-
+            } // Lock is dropped here
+            
+            // Store separated task ID sets BEFORE building buckets
+            submitted_jobs
+                .set_cpu_bound_task_ids(cpu_bound_task_ids_temp.clone())
+                .await;
+            submitted_jobs
+                .set_io_bound_task_ids(io_bound_task_ids_temp.clone())
+                .await;
+            
+            // Build memory buckets for fast lookup (only if memory predictions exist)
+            submitted_jobs.build_memory_buckets().await;
+            
             // Sort jobs by execution time from largest to shortest (descending)
             // This way, when we pop() from the end, we get the job with shortest time
+            let mut jobs = submitted_jobs.jobs.lock().await;
             jobs.sort_by(|a, b| {
                 let a_time = a.execution_time_prediction.unwrap_or(0.0);
                 let b_time = b.execution_time_prediction.unwrap_or(0.0);
@@ -531,33 +561,9 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm {
                 job_ids_before.len()
             );
 
-            // Separate jobs into CPU-bound and I/O-bound task ID vectors (maintaining sort order)
-            let mut cpu_bound_task_ids: Vec<String> = Vec::new();
-            let mut io_bound_task_ids: Vec<String> = Vec::new();
-
-            for job in jobs.iter() {
-                match job.task_bound_type {
-                    Some(TaskBoundType::CpuBound) => {
-                        cpu_bound_task_ids.push(job.id.clone());
-                    }
-                    Some(TaskBoundType::IoBound) => {
-                        io_bound_task_ids.push(job.id.clone());
-                    }
-                    _ => {
-                        // For Mixed or None, we can decide based on heuristics or add to both
-                        // For now, let's add Mixed tasks to CPU-bound as a default
-                        cpu_bound_task_ids.push(job.id.clone());
-                    }
-                }
-            }
-
-            // Store separated task ID sets in SubmittedJobs
-            submitted_jobs
-                .set_cpu_bound_task_ids(cpu_bound_task_ids.clone())
-                .await;
-            submitted_jobs
-                .set_io_bound_task_ids(io_bound_task_ids.clone())
-                .await;
+            // Task ID sets were already set before building buckets, just use them
+            let cpu_bound_task_ids = cpu_bound_task_ids_temp;
+            let io_bound_task_ids = io_bound_task_ids_temp;
 
             println!(
                 "[TASK SEPARATION] CPU-bound tasks: {}, I/O-bound tasks: {}",

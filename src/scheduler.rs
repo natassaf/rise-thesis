@@ -629,11 +629,15 @@ impl SchedulerEngine {
                         drop(reschedule);
                         
                         if sequential_run_flag {
-                            // If sequential_run_flag is true, only add to failed_job_ids if it's NOT in reschedule
-                            // If it's in reschedule, skip adding to failed because it will be retried
-                            if !was_in_reschedule {
+                            // In sequential mode, if job was in reschedule and fails, it means it already failed once
+                            // Remove it from reschedule and mark as failed (don't retry again)
+                            if was_in_reschedule {
+                                // Job in reschedule failed again in sequential mode - mark as failed
                                 self.submitted_jobs.add_to_failed(&task_status_message.job_id).await;
-                                // Remove from jobs list when it goes to failed_job_ids
+                                self.submitted_jobs.remove_job(task_status_message.job_id.clone()).await;
+                            } else {
+                                // Job not in reschedule failed - add to failed
+                                self.submitted_jobs.add_to_failed(&task_status_message.job_id).await;
                                 self.submitted_jobs.remove_job(task_status_message.job_id.clone()).await;
                             }
                         } else {
