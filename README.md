@@ -28,7 +28,7 @@ Cross compilation didn't work on macOS due to the `ort` dependency that fails. U
 1. Find the IP of your Raspberry Pi and connect via SSH:
    ```bash
    ssh pi@<ip>
-   # Example: ssh pi@192.168.8.110
+   # Example: ssh pi@192.168.1.42
    ```
 
 2. Install dependencies:
@@ -64,7 +64,7 @@ Cross compilation didn't work on macOS due to the `ort` dependency that fails. U
    # On Host: Copy project
    cargo clean 
    
-   scp -r . pi@192.168.8.110:/home/pi/rise-thesis
+   scp -r . pi@192.168.1.42:/home/pi/rise-thesis
    ```
 
 4. Build the project:

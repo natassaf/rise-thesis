@@ -610,3 +610,97 @@ impl SchedulerAlgorithm for MemoryTimeAwareSchedulerAlgorithm {
         (io_bound_task_ids, cpu_bound_task_ids)
     }
 }
+
+#[derive(Clone)]
+pub struct Improvement3 {
+    utils: SchedulerAlgorithmUtils
+}
+
+impl Improvement3 {
+    pub fn new() -> Self {
+        let utils = SchedulerAlgorithmUtils::new();
+        Self { utils }
+    }
+}
+
+#[async_trait]
+impl SchedulerAlgorithm for Improvement3 {
+    async fn prioritize_tasks(
+        &self,
+        submitted_jobs: &web::Data<SubmittedJobs>,
+    ) -> (Vec<String>, Vec<String>) {
+        let jobs = submitted_jobs.get_jobs().await;
+        if jobs.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        const PREDICTIONS_FILE: &str = "feature_predictions/predictions.json";
+        let job_ids: Vec<String> = jobs.iter().map(|job| job.id.clone()).collect();
+        
+        // Load only memory predictions (ignore time and task_bound_type)
+        let job_id_to_memory_prediction = match load_predictions_from_file(PREDICTIONS_FILE, &job_ids) {
+            Ok((mem_pred, _, _)) => {
+                println!("Loaded memory predictions from {}", PREDICTIONS_FILE);
+                mem_pred
+            }
+            Err(e) => {
+                eprintln!("Failed to load predictions from file: {}. Falling back to computing predictions.", e);
+                // Fallback: compute only memory predictions
+                let feature_results = self.utils.extract_features_parallel(&jobs);
+                let mut predictions = HashMap::new();
+                
+                for batch_start in (0..feature_results.len()).step_by(20) {
+                    let batch_end = std::cmp::min(batch_start + 20, feature_results.len());
+                    let (batch_ids, batch_features): (Vec<_>, Vec<_>) = feature_results[batch_start..batch_end]
+                        .iter()
+                        .map(|(id, mem_feat, _, _)| (id.clone(), mem_feat.clone()))
+                        .unzip();
+                    
+                    let memory_preds = predict_memory_batch(&batch_features).await;
+                    for (id, pred) in batch_ids.iter().zip(memory_preds.iter()) {
+                        predictions.insert(id.clone(), *pred);
+                    }
+                }
+                predictions
+            }
+        };
+
+        // Update jobs with memory predictions
+        // Set execution_time_prediction to negative memory so that when buckets sort by time,
+        // larger memory jobs are selected first (since we sort by shortest time first)
+        for job_id in &job_ids {
+            submitted_jobs.update_job(job_id, |job| {
+                if let Some(prediction) = job_id_to_memory_prediction.get(job_id) {
+                    job.memory_prediction = Some(*prediction);
+                    // Use negative memory as "execution time" so larger jobs are prioritized
+                    // when buckets sort by execution time (shortest first = largest memory first)
+                    job.execution_time_prediction = Some(-prediction);
+                }
+            }).await;
+        }
+        
+        // Build memory buckets and sort jobs by memory (ascending for consistent ordering)
+        submitted_jobs.build_memory_buckets().await;
+        submitted_jobs.sort_jobs(|a, b| {
+            a.memory_prediction.unwrap_or(0.0).partial_cmp(&b.memory_prediction.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }).await;
+        
+        // Separate into two halves based on memory (jobs are already sorted by memory)
+        let sorted_jobs = submitted_jobs.get_jobs().await;
+        let split_point = sorted_jobs.len() / 2;
+        let first_half: Vec<String> = sorted_jobs[..split_point].iter().map(|j| j.id.clone()).collect();
+        let second_half: Vec<String> = sorted_jobs[split_point..].iter().map(|j| j.id.clone()).collect();
+        
+        submitted_jobs.set_cpu_bound_task_ids(first_half.clone()).await;
+        submitted_jobs.set_io_bound_task_ids(second_half.clone()).await;
+
+        println!(
+            "[MEMORY SEPARATION] Low memory tasks: {}, High memory tasks: {}",
+            first_half.len(),
+            second_half.len()
+        );
+
+        (first_half, second_half)
+    }
+}
