@@ -79,7 +79,8 @@ impl SchedulerAlgorithmUtils{
 
     /// Extract features for all jobs in parallel using rayon
     pub fn extract_features_parallel(&self, jobs: &[Job]) -> Vec<(String, Vec<f32>, Vec<f32>, Vec<f32>)> {
-        jobs.par_iter()
+        let features_start = std::time::Instant::now();
+        let result = jobs.par_iter()
             .map(|job| {
                 let cwasm_file = job.binary_path.replace(".wasm", ".cwasm");
                 let wat_file = job.binary_path.replace(".wasm", ".wat");
@@ -97,7 +98,20 @@ impl SchedulerAlgorithmUtils{
                     task_type_features.to_vec(),
                 )
             })
-            .collect()
+            .collect();
+        
+        let features_time = features_start.elapsed();
+        let num_tasks = jobs.len();
+        let avg_features_time_per_task = if num_tasks > 0 {
+            features_time.as_secs_f64() / num_tasks as f64
+        } else {
+            0.0
+        };
+        println!("[TIMING] Features extraction - Total: {:.3}s ({:.3}ms), Per task: {:.3}ms ({} tasks)", 
+                 features_time.as_secs_f64(), features_time.as_secs_f64() * 1000.0, 
+                 avg_features_time_per_task * 1000.0, num_tasks);
+        
+        result
     }
     
     /// Process predictions in batches and return memory and time predictions
@@ -109,6 +123,7 @@ impl SchedulerAlgorithmUtils{
         HashMap<String, f64>,
         HashMap<String, TaskBoundType>,
     ) {
+        let predictions_start = std::time::Instant::now();
         let mut job_id_to_memory_prediction: HashMap<String, f64> = HashMap::new();
         let mut job_id_to_time_prediction: HashMap<String, f64> = HashMap::new();
         let mut job_id_to_task_bound_type: HashMap<String, TaskBoundType> = HashMap::new();
@@ -150,6 +165,17 @@ impl SchedulerAlgorithmUtils{
                 
             }
         }
+
+        let predictions_time = predictions_start.elapsed();
+        let num_tasks = feature_results.len();
+        let avg_predictions_time_per_task = if num_tasks > 0 {
+            predictions_time.as_secs_f64() / num_tasks as f64
+        } else {
+            0.0
+        };
+        println!("[TIMING] Predictions - Total: {:.3}s ({:.3}ms), Per task: {:.3}ms ({} tasks)", 
+                 predictions_time.as_secs_f64(), predictions_time.as_secs_f64() * 1000.0, 
+                 avg_predictions_time_per_task * 1000.0, num_tasks);
 
         (
             job_id_to_memory_prediction,
@@ -649,6 +675,7 @@ impl SchedulerAlgorithm for Improvement3 {
                 let feature_results = self.utils.extract_features_parallel(&jobs);
                 let mut predictions = HashMap::new();
                 
+                let batch_predictions_start = std::time::Instant::now();
                 for batch_start in (0..feature_results.len()).step_by(20) {
                     let batch_end = std::cmp::min(batch_start + 20, feature_results.len());
                     let (batch_ids, batch_features): (Vec<_>, Vec<_>) = feature_results[batch_start..batch_end]
@@ -661,6 +688,16 @@ impl SchedulerAlgorithm for Improvement3 {
                         predictions.insert(id.clone(), *pred);
                     }
                 }
+                let batch_predictions_time = batch_predictions_start.elapsed();
+                let num_tasks = jobs.len();
+                let avg_predictions_time_per_task = if num_tasks > 0 {
+                    batch_predictions_time.as_secs_f64() / num_tasks as f64
+                } else {
+                    0.0
+                };
+                println!("[TIMING] Improvement3 memory predictions - Total: {:.3}s ({:.3}ms), Per task: {:.3}ms ({} tasks)", 
+                         batch_predictions_time.as_secs_f64(), batch_predictions_time.as_secs_f64() * 1000.0, 
+                         avg_predictions_time_per_task * 1000.0, num_tasks);
                 predictions
             }
         };

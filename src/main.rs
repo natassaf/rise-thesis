@@ -16,6 +16,7 @@ use crate::api::api_handlers::{
 use crate::api::api_objects::SubmittedJobs;
 use crate::evaluation_metrics::EvaluationMetrics;
 use crate::jobs_order_optimizer::JobsOrderOptimizer;
+use crate::memory_monitoring::read_memory_file;
 use crate::scheduler::SchedulerEngine;
 use actix_web::{App, HttpServer, web};
 use core_affinity::{CoreId, get_core_ids};
@@ -78,6 +79,20 @@ async fn main() -> std::io::Result<()> {
         scheduler.lock().await.start().await;
     });
     
+    // Wait a bit for scheduler and workers to fully initialize
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    
+    // Measure idle memory usage after scheduler and workers have been spawned
+    match read_memory_file("memory.current") {
+        Some(current_bytes) => {
+            let memory_kb = current_bytes / 1024;
+            println!("Idle memory usage (after scheduler and workers spawned): {} KB ({:.2} MB)", 
+                     memory_kb, memory_kb as f64 / 1024.0);
+        }
+        None => {
+            println!("Warning: Could not measure idle memory usage");
+        }
+    }
 
     // Create server with graceful shutdown
     let server = HttpServer::new(move || {
