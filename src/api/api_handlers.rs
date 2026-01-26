@@ -21,10 +21,17 @@ pub async fn handle_predict_and_sort(
     task: web::Json<ExecuteTasksRequest>,
     app_data: web::Data<Arc<Mutex<JobsOrderOptimizer>>>,
 ) -> impl Responder {
+    let total_start = std::time::Instant::now();
+    
     let jobs_order_optimizer = app_data.lock().await;
     let scheduling_algorithm = task.into_inner().scheduling_algorithm;
     jobs_order_optimizer.predict_and_sort(scheduling_algorithm).await;
     drop(jobs_order_optimizer);
+    
+    let total_time = total_start.elapsed();
+    println!("[TIMING] handle_predict_and_sort total time: {:.3}s ({:.3}ms)", 
+             total_time.as_secs_f64(), total_time.as_secs_f64() * 1000.0);
+    
     HttpResponse::Ok().body(format!("Predictions and sorting completed"))
 }
 
